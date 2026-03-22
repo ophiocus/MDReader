@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 // ─── file tree ────────────────────────────────────────────────────────────────
@@ -81,7 +82,7 @@ fn build_tree(root: &str) -> Vec<FileNode> {
     nodes
 }
 
-/// Returns the path of any file clicked in the tree.
+/// Renders one tree node; returns the path of any file clicked.
 fn render_node(
     ui: &mut egui::Ui,
     node: &mut FileNode,
@@ -106,7 +107,6 @@ fn render_node(
 
         NodeKind::File => {
             let is_selected = selected.as_ref() == Some(&node.path);
-            // Don't override color for unselected — let the theme decide.
             let label = if is_selected {
                 RichText::new(format!("  📄 {}", node.name))
                     .color(Color32::from_rgb(80, 170, 255))
@@ -179,7 +179,6 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
         v.panel_fill = Color32::from_rgb(22, 22, 26);
         v.window_fill = Color32::from_rgb(30, 30, 36);
         v.window_rounding = egui::Rounding::same(6.0);
-        // Make --- horizontal rules visible against the dark background.
         v.widgets.noninteractive.bg_stroke =
             egui::Stroke::new(1.0, Color32::from_rgb(55, 55, 65));
         ctx.set_visuals(v);
@@ -187,6 +186,112 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
         let mut v = egui::Visuals::light();
         v.window_rounding = egui::Rounding::same(6.0);
         ctx.set_visuals(v);
+    }
+}
+
+// ─── pdf export ───────────────────────────────────────────────────────────────
+
+/// Wraps rendered HTML in a styled page template suitable for printing.
+fn html_page(body: &str, title: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         max-width: 860px; margin: 40px auto; padding: 0 20px;
+         line-height: 1.6; color: #1a1a1a; }}
+  h1,h2,h3,h4 {{ margin-top: 1.4em; }}
+  h1 {{ border-bottom: 2px solid #e0e0e0; padding-bottom: .3em; }}
+  h2 {{ border-bottom: 1px solid #eee; padding-bottom: .2em; }}
+  code {{ background: #f4f4f4; border-radius: 3px;
+          padding: 0.1em 0.35em; font-size: 0.9em; }}
+  pre  {{ background: #f4f4f4; border-radius: 5px;
+          padding: 1em; overflow-x: auto; }}
+  pre code {{ background: none; padding: 0; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
+  th, td {{ border: 1px solid #ddd; padding: 6px 12px; text-align: left; }}
+  th {{ background: #f0f0f0; font-weight: 600; }}
+  tr:nth-child(even) {{ background: #fafafa; }}
+  blockquote {{ border-left: 4px solid #ccc; margin: 0;
+                padding-left: 1em; color: #555; }}
+  hr {{ border: none; border-top: 1px solid #ddd; margin: 2em 0; }}
+  img {{ max-width: 100%; }}
+</style>
+</head>
+<body>
+{body}
+</body>
+</html>"#
+    )
+}
+
+/// Locate Chrome or Edge for headless PDF rendering.
+fn find_chrome() -> Option<PathBuf> {
+    let candidates = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ];
+    candidates
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.exists())
+}
+
+/// Export the current markdown file to PDF.
+/// Returns `Ok(path)` on success or `Err(message)` on failure.
+fn export_pdf(content: &str, source_path: &Path) -> Result<PathBuf, String> {
+    // ── 1. pick save location ──────────────────────────────────────────────
+    let stem = source_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let default_name = format!("{stem}.pdf");
+
+    let pdf_path = rfd::FileDialog::new()
+        .add_filter("PDF", &["pdf"])
+        .set_file_name(&default_name)
+        .save_file()
+        .ok_or_else(|| "Export cancelled.".to_string())?;
+
+    // ── 2. markdown → HTML ─────────────────────────────────────────────────
+    let opts = comrak::Options::default();
+    let body = comrak::markdown_to_html(content, &opts);
+    let title = stem.as_ref();
+    let html = html_page(&body, title);
+
+    // ── 3. write temp HTML ─────────────────────────────────────────────────
+    let tmp_html = std::env::temp_dir().join("mdreader_export.html");
+    fs::write(&tmp_html, &html)
+        .map_err(|e| format!("Failed to write temp HTML: {e}"))?;
+
+    // ── 4. Chrome / Edge headless → PDF ───────────────────────────────────
+    let chrome = find_chrome()
+        .ok_or_else(|| "Chrome/Edge not found — saved as HTML instead.".to_string())?;
+
+    let out = Command::new(&chrome)
+        .args([
+            "--headless=new",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-software-rasterizer",
+            &format!("--print-to-pdf={}", pdf_path.display()),
+            &format!("file:///{}", tmp_html.display().to_string().replace('\\', "/")),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to launch browser: {e}"))?;
+
+    let _ = fs::remove_file(&tmp_html);
+
+    if out.status.success() || pdf_path.exists() {
+        Ok(pdf_path)
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(format!("Browser error: {stderr}"))
     }
 }
 
@@ -202,9 +307,10 @@ struct MDReaderApp {
     root_input: String,
     /// System-native pixels-per-point captured at startup; zoom is applied on top.
     native_ppp: f32,
-    /// Zoom value being previewed while the user is actively dragging.
-    /// `None` when not dragging. Committed to `config.zoom` on release.
+    /// Zoom preview while dragging — committed to `config.zoom` on release.
     drag_zoom: Option<f32>,
+    /// Transient status message shown in the status bar (e.g. after PDF export).
+    status_msg: Option<String>,
 }
 
 impl MDReaderApp {
@@ -228,6 +334,7 @@ impl MDReaderApp {
             root_input,
             native_ppp,
             drag_zoom: None,
+            status_msg: None,
         }
     }
 
@@ -247,22 +354,28 @@ impl MDReaderApp {
     fn refresh_tree(&mut self) {
         self.tree = build_tree(&self.config.root_path);
     }
+
+    /// Root folder display name for the sidebar title.
+    fn root_display_name(&self) -> String {
+        Path::new(&self.config.root_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    }
 }
 
 // ─── ui ───────────────────────────────────────────────────────────────────────
 
 impl eframe::App for MDReaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // ── window title: "MD Reader — <root folder>" ───────────────────────
-        let root_name = Path::new(&self.config.root_path)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-            format!("MD Reader — {root_name}"),
-        ));
+        // ── window title ─────────────────────────────────────────────────────
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "MD Reader — {}",
+            self.root_display_name()
+        )));
 
-        // ── settings modal ──────────────────────────────────────────────────
+        // ── settings modal ───────────────────────────────────────────────────
         if self.show_settings {
             egui::Window::new("⚙  Settings")
                 .resizable(false)
@@ -307,7 +420,7 @@ impl eframe::App for MDReaderApp {
                 });
         }
 
-        // ── menu bar ────────────────────────────────────────────────────────
+        // ── menu bar ─────────────────────────────────────────────────────────
         egui::TopBottomPanel::top("topbar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.label(RichText::new("📖").size(15.0));
@@ -322,14 +435,37 @@ impl eframe::App for MDReaderApp {
                         self.refresh_tree();
                         ui.close_menu();
                     }
+
                     ui.separator();
+
+                    // Export to PDF — only enabled when a file is open.
+                    let can_export = self.selected_file.is_some() && !self.file_content.is_empty();
+                    if ui
+                        .add_enabled(can_export, egui::Button::new("⬇  Export as PDF…"))
+                        .clicked()
+                    {
+                        if let Some(ref path) = self.selected_file.clone() {
+                            match export_pdf(&self.file_content, path) {
+                                Ok(out) => {
+                                    self.status_msg =
+                                        Some(format!("✔ PDF saved → {}", out.display()));
+                                }
+                                Err(e) => {
+                                    self.status_msg = Some(format!("✘ {e}"));
+                                }
+                            }
+                        }
+                        ui.close_menu();
+                    }
+
+                    ui.separator();
+
                     if ui.button("Quit").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
 
                 ui.menu_button("View", |ui| {
-                    // ── light / dark ──
                     let theme_label = if self.config.dark_mode {
                         "☀  Light mode"
                     } else {
@@ -344,7 +480,6 @@ impl eframe::App for MDReaderApp {
 
                     ui.separator();
 
-                    // ── zoom presets ──
                     for &(label, factor) in &[
                         ("75%",  0.75_f32),
                         ("100%", 1.00_f32),
@@ -369,7 +504,7 @@ impl eframe::App for MDReaderApp {
                     }
                 });
 
-                // current filename right-aligned
+                // Current filename — right-aligned.
                 if let Some(ref p) = self.selected_file {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
@@ -383,16 +518,18 @@ impl eframe::App for MDReaderApp {
             });
         });
 
-        // ── status bar — zoom drag ───────────────────────────────────────────
-        //
-        // Drag the percentage label left/right to shrink/expand the UI scale.
-        // Markdown code fences support language tags (```rust, ```python, etc.)
-        // and egui_commonmark's syntect backend renders them with full syntax
-        // colouring automatically.
+        // ── status bar ───────────────────────────────────────────────────────
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // full path on the left
-                if let Some(ref p) = self.selected_file {
+                // Status message (export result) or file path.
+                if let Some(ref msg) = self.status_msg {
+                    if ui
+                        .label(RichText::new(msg).size(11.0).weak())
+                        .clicked()
+                    {
+                        self.status_msg = None;
+                    }
+                } else if let Some(ref p) = self.selected_file {
                     ui.label(
                         RichText::new(p.to_string_lossy().as_ref())
                             .weak()
@@ -401,14 +538,10 @@ impl eframe::App for MDReaderApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Show the live preview during drag, otherwise the committed value.
+                    // Draggable zoom label.
                     let display_zoom = self.drag_zoom.unwrap_or(self.config.zoom);
                     let pct = (display_zoom * 100.0).round() as i32;
 
-                    // Draggable zoom label — horizontal drag adjusts scale.
-                    // IMPORTANT: we never call set_pixels_per_point while dragging.
-                    // Doing so shifts the logical coordinate system mid-drag, which
-                    // makes drag_delta() diverge wildly on subsequent frames.
                     let response = ui
                         .add(
                             egui::Label::new(
@@ -425,14 +558,12 @@ impl eframe::App for MDReaderApp {
                     }
 
                     if response.dragged() {
-                        // Accumulate into the preview; leave ppp (and the coordinate
-                        // system) completely untouched until the drag finishes.
+                        // Accumulate into preview only — never touch ppp mid-drag.
                         let z = self.drag_zoom.get_or_insert(self.config.zoom);
                         *z = (*z + response.drag_delta().x * 0.003).clamp(0.25, 4.0);
                     }
 
                     if response.drag_stopped() {
-                        // Commit: apply scale and persist only once, at release.
                         if let Some(z) = self.drag_zoom.take() {
                             self.config.zoom = z;
                             ctx.set_pixels_per_point(self.native_ppp * z);
@@ -446,7 +577,7 @@ impl eframe::App for MDReaderApp {
             });
         });
 
-        // ── left sidebar ─────────────────────────────────────────────────────
+        // ── left sidebar — TOC ───────────────────────────────────────────────
         let mut file_to_load: Option<PathBuf> = None;
         let sel = self.selected_file.clone();
 
@@ -454,8 +585,17 @@ impl eframe::App for MDReaderApp {
             .min_width(200.0)
             .default_width(300.0)
             .show(ctx, |ui| {
-                ui.add_space(4.0);
-                ui.label(RichText::new("  FILES").size(11.0).weak());
+                // Root folder as TOC title.
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(self.root_display_name())
+                            .size(14.0)
+                            .strong(),
+                    );
+                });
+                ui.add_space(2.0);
                 ui.separator();
 
                 ScrollArea::vertical()
