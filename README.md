@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/md_reader_logo.png" alt="MD Reader" width="180"/>
+</p>
+
 # MDReader
 
 A read-only Windows desktop markdown viewer built with Rust and egui/eframe.
