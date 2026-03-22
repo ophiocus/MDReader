@@ -199,6 +199,9 @@ struct MDReaderApp {
     root_input: String,
     /// System-native pixels-per-point captured at startup; zoom is applied on top.
     native_ppp: f32,
+    /// Zoom value being previewed while the user is actively dragging.
+    /// `None` when not dragging. Committed to `config.zoom` on release.
+    drag_zoom: Option<f32>,
 }
 
 impl MDReaderApp {
@@ -221,6 +224,7 @@ impl MDReaderApp {
             show_settings: false,
             root_input,
             native_ppp,
+            drag_zoom: None,
         }
     }
 
@@ -385,9 +389,14 @@ impl eframe::App for MDReaderApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let pct = (self.config.zoom * 100.0).round() as i32;
+                    // Show the live preview during drag, otherwise the committed value.
+                    let display_zoom = self.drag_zoom.unwrap_or(self.config.zoom);
+                    let pct = (display_zoom * 100.0).round() as i32;
 
-                    // Draggable zoom label — horizontal drag adjusts scale
+                    // Draggable zoom label — horizontal drag adjusts scale.
+                    // IMPORTANT: we never call set_pixels_per_point while dragging.
+                    // Doing so shifts the logical coordinate system mid-drag, which
+                    // makes drag_delta() diverge wildly on subsequent frames.
                     let response = ui
                         .add(
                             egui::Label::new(
@@ -404,15 +413,19 @@ impl eframe::App for MDReaderApp {
                     }
 
                     if response.dragged() {
-                        let dx = response.drag_delta().x;
-                        self.config.zoom =
-                            (self.config.zoom + dx * 0.005).clamp(0.25, 4.0);
-                        ctx.set_pixels_per_point(self.native_ppp * self.config.zoom);
+                        // Accumulate into the preview; leave ppp (and the coordinate
+                        // system) completely untouched until the drag finishes.
+                        let z = self.drag_zoom.get_or_insert(self.config.zoom);
+                        *z = (*z + response.drag_delta().x * 0.003).clamp(0.25, 4.0);
                     }
 
-                    // Persist only when the drag finishes, not every frame.
                     if response.drag_stopped() {
-                        self.config.save();
+                        // Commit: apply scale and persist only once, at release.
+                        if let Some(z) = self.drag_zoom.take() {
+                            self.config.zoom = z;
+                            ctx.set_pixels_per_point(self.native_ppp * z);
+                            self.config.save();
+                        }
                     }
 
                     ui.separator();
