@@ -2,6 +2,28 @@
 name = "mdreader"
 version = "0.1.0"
 edition = "2021"
+authors = ["ophiocus <csantanad@gmail.com>"]
+description = "Read-only Windows markdown viewer built with Rust and egui"
+license = "MIT"
+
+[package.metadata.deb]
+maintainer = "ophiocus <csantanad@gmail.com>"
+copyright = "2024 ophiocus"
+extended-description = "Scans a configurable root directory for .md files, renders them with syntax highlighting, and exports to PDF."
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/mdreader", "usr/bin/mdreader", "755"],
+    ["README.md", "usr/share/doc/mdreader/README.md", "644"],
+]
+
+[package.metadata.bundle]
+name = "MD Reader"
+identifier = "com.ophiocus.mdreader"
+icon = ["assets/icon.png"]
+short_description = "Read-only markdown viewer"
+copyright = "Copyright © 2024 ophiocus"
 
 [dependencies]
 eframe = "0.28"
