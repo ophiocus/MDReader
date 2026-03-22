@@ -179,6 +179,9 @@ fn apply_theme(ctx: &egui::Context, dark: bool) {
         v.panel_fill = Color32::from_rgb(22, 22, 26);
         v.window_fill = Color32::from_rgb(30, 30, 36);
         v.window_rounding = egui::Rounding::same(6.0);
+        // Make --- horizontal rules visible against the dark background.
+        v.widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(1.0, Color32::from_rgb(55, 55, 65));
         ctx.set_visuals(v);
     } else {
         let mut v = egui::Visuals::light();
@@ -250,6 +253,15 @@ impl MDReaderApp {
 
 impl eframe::App for MDReaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── window title: "MD Reader — <root folder>" ───────────────────────
+        let root_name = Path::new(&self.config.root_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(
+            format!("MD Reader — {root_name}"),
+        ));
+
         // ── settings modal ──────────────────────────────────────────────────
         if self.show_settings {
             egui::Window::new("⚙  Settings")
@@ -439,8 +451,8 @@ impl eframe::App for MDReaderApp {
         let sel = self.selected_file.clone();
 
         egui::SidePanel::left("sidebar")
-            .min_width(180.0)
-            .default_width(260.0)
+            .min_width(200.0)
+            .default_width(300.0)
             .show(ctx, |ui| {
                 ui.add_space(4.0);
                 ui.label(RichText::new("  FILES").size(11.0).weak());
