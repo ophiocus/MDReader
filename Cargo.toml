@@ -1,0 +1,17 @@
+[package]
+name = "mdreader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.28"
+egui_commonmark = { version = "0.17", features = ["better_syntax_highlighting"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+rfd = "0.14"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
