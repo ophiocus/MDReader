@@ -24,6 +24,44 @@ MDReader scans a configurable root directory for `.md` files, presents them in a
 
 ---
 
+## Interface
+
+<p align="center">
+  <img src="assets/sample_1.png" alt="MDReader interface" width="900"/>
+</p>
+
+### File tree (left sidebar)
+
+The sidebar is populated at startup by recursively walking the configured root directory. The tree builder applies three rules before anything is displayed:
+
+- **Directories are omitted if they contain no `.md` files** at any depth — empty or non-markdown folders never appear.
+- **Sort order is directories-first, then alphabetical** within each level, matching the convention of most file explorers.
+- **Nesting is unlimited** — the screenshot shows a six-level hierarchy (`ComfyUI → .venv → Lib → site-packages → comfyui_embedded_docs → docs → BasicScheduler`) rendered without any depth cap.
+
+Each folder is a collapsible `CollapsingHeader`. Clicking a folder toggles it open or closed without triggering a file load. Clicking a `.md` file loads and renders it immediately; the active file is highlighted in blue.
+
+The title bar reflects the root folder in use (`MD Reader — Documents` in the screenshot). Changing the root via **File > Settings** rebuilds the tree from scratch and resets the active file.
+
+### Markdown renderer (right panel)
+
+The content panel renders the selected file using `egui_commonmark` against the full CommonMark spec:
+
+- **Tables** — column widths are sized to content; the panel scrolls horizontally if a table overflows.
+- **Inline code and code fences** — monospaced with background highlight; fenced blocks with a language tag (` ```python `, ` ```rust `, ` ```bash `, etc.) receive full syntax colouring via the `syntect` engine.
+- **Bold, italic, blockquotes, bullet lists, headings** — all rendered natively by the egui widget layer with no HTML or WebView involved.
+
+### Status bar
+
+The bottom bar shows two pieces of information simultaneously:
+
+| Left | Right |
+|---|---|
+| Full absolute path of the open file | Zoom percentage — drag left/right to scale the entire UI |
+
+Zoom changes are previewed live in the percentage label during drag and committed to disk only on release, keeping the coordinate system stable throughout the gesture.
+
+---
+
 ## Requirements
 
 - Windows 10 or 11 (64-bit)
