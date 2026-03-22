@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target/
+
+# Claude Code internals
+.claude/
+
+# Temporary icon intermediates (generated at build time)
+assets/icon_16.png
+assets/icon_32.png
+assets/icon_48.png
+assets/icon_256.png
+assets/save_clipboard.ps1
+
+# Editor autosaves
+*.kra
+*.kra~
