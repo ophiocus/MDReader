@@ -10,6 +10,16 @@ MDReader scans a configurable root directory for `.md` files, presents them in a
 
 ---
 
+## Motivation
+
+Documentation tools tend to fall into one of two traps: they are either too heavy — Electron shells consuming half a gigabyte of RAM to display plain text — or too bare, leaving the reader staring at raw markup.
+
+MDReader exists in the gap between those two. It is a native, self-contained binary with no runtime, no browser engine, and no background services. It starts in under a second, renders markdown faithfully, and stays out of the way. Nothing is editable; there are no plugins, no cloud sync, no telemetry. It simply reads files.
+
+The intended audience is anyone who keeps a local library of markdown — documentation, notes, references, runbooks — and wants to browse it without ceremony.
+
+---
+
 ## Features
 
 - **Recursive file tree** — scans the root directory and all subdirectories for `.md` files; directories containing no markdown are omitted automatically.
