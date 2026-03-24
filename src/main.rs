@@ -8,7 +8,67 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc,
 };
+
+// ─── update checker ───────────────────────────────────────────────────────────
+
+struct UpdateAvailable {
+    version: String,
+    url: String,
+}
+
+enum UpdateState {
+    Checking,
+    Idle,
+    Available(UpdateAvailable),
+    Downloading,
+}
+
+fn is_newer(latest: &str, current: &str) -> bool {
+    let parse = |s: &str| -> (u32, u32, u32) {
+        let mut p = s.splitn(3, '.');
+        let a = p.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let b = p.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let c = p.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        (a, b, c)
+    };
+    parse(latest) > parse(current)
+}
+
+fn check_latest_release() -> Option<UpdateAvailable> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("MDReader/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp: serde_json::Value = client
+        .get("https://api.github.com/repos/ophiocus/MDReader/releases/latest")
+        .send().ok()?.json().ok()?;
+    let tag = resp["tag_name"].as_str()?.trim_start_matches('v').to_string();
+    if !is_newer(&tag, env!("CARGO_PKG_VERSION")) { return None; }
+    let url = resp["assets"].as_array()?.iter()
+        .find(|a| a["name"].as_str().unwrap_or("").ends_with(".msi"))?
+        ["browser_download_url"].as_str()?.to_string();
+    Some(UpdateAvailable { version: tag, url })
+}
+
+fn download_and_install(url: &str, version: &str) {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(concat!("MDReader/", env!("CARGO_PKG_VERSION")))
+        .build();
+    if let Ok(client) = client {
+        if let Ok(bytes) = client.get(url).send().and_then(|r| r.bytes()) {
+            let path = std::env::temp_dir().join(format!("MDReader-{version}.msi"));
+            if std::fs::write(&path, &bytes).is_ok() {
+                let _ = std::process::Command::new("msiexec")
+                    .args(["/i", path.to_str().unwrap_or(""), "/passive", "/norestart"])
+                    .spawn();
+                std::process::exit(0);
+            }
+        }
+    }
+}
 
 // ─── file tree ────────────────────────────────────────────────────────────────
 
@@ -311,18 +371,30 @@ struct MDReaderApp {
     drag_zoom: Option<f32>,
     /// Transient status message shown in the status bar (e.g. after PDF export).
     status_msg: Option<String>,
+    /// Receives the result of the background update check.
+    update_rx: mpsc::Receiver<Option<UpdateAvailable>>,
+    /// Current state of the update workflow.
+    update_state: UpdateState,
 }
 
 impl MDReaderApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let config = Config::load();
+    fn new(cc: &eframe::CreationContext<'_>, cli_root: Option<String>) -> Self {
+        let mut config = Config::load();
         let native_ppp = cc.egui_ctx.pixels_per_point();
+
+        if let Some(root) = cli_root {
+            config.root_path = root;
+            config.save();
+        }
 
         apply_theme(&cc.egui_ctx, config.dark_mode);
         cc.egui_ctx.set_pixels_per_point(native_ppp * config.zoom);
 
         let tree = build_tree(&config.root_path);
         let root_input = config.root_path.clone();
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || { let _ = tx.send(check_latest_release()); });
 
         Self {
             config,
@@ -335,6 +407,8 @@ impl MDReaderApp {
             native_ppp,
             drag_zoom: None,
             status_msg: None,
+            update_rx: rx,
+            update_state: UpdateState::Checking,
         }
     }
 
@@ -369,6 +443,14 @@ impl MDReaderApp {
 
 impl eframe::App for MDReaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // ── poll update channel ──────────────────────────────────────────────
+        if let Ok(result) = self.update_rx.try_recv() {
+            self.update_state = match result {
+                Some(avail) => UpdateState::Available(avail),
+                None => UpdateState::Idle,
+            };
+        }
+
         // ── window title ─────────────────────────────────────────────────────
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
             "MD Reader — {}",
@@ -521,6 +603,31 @@ impl eframe::App for MDReaderApp {
         // ── status bar ───────────────────────────────────────────────────────
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                // Update state UI — shown before status_msg / file path.
+                match &self.update_state {
+                    UpdateState::Checking => {
+                        ui.label(RichText::new("⟳ checking for updates…").weak().size(11.0));
+                        ui.separator();
+                    }
+                    UpdateState::Available(avail) => {
+                        let label = RichText::new(format!("↑ v{} available — click to install", avail.version))
+                            .size(11.0)
+                            .color(Color32::from_rgb(80, 210, 110));
+                        if ui.add(egui::Label::new(label).sense(egui::Sense::click())).clicked() {
+                            let url = avail.url.clone();
+                            let version = avail.version.clone();
+                            std::thread::spawn(move || download_and_install(&url, &version));
+                            self.update_state = UpdateState::Downloading;
+                        }
+                        ui.separator();
+                    }
+                    UpdateState::Downloading => {
+                        ui.label(RichText::new("⬇ downloading update…").weak().size(11.0));
+                        ui.separator();
+                    }
+                    UpdateState::Idle => {}
+                }
+
                 // Status message (export result) or file path.
                 if let Some(ref msg) = self.status_msg {
                     if ui
@@ -650,6 +757,15 @@ impl eframe::App for MDReaderApp {
 // ─── entry point ──────────────────────────────────────────────────────────────
 
 fn main() {
+    // Check if first argument is a valid directory (used by context menu).
+    let cli_root: Option<String> = std::env::args().nth(1).and_then(|arg| {
+        if std::path::Path::new(&arg).is_dir() {
+            Some(arg)
+        } else {
+            None
+        }
+    });
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MD Reader")
@@ -661,7 +777,7 @@ fn main() {
     eframe::run_native(
         "MD Reader",
         options,
-        Box::new(|cc| Ok(Box::new(MDReaderApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(MDReaderApp::new(cc, cli_root)))),
     )
     .expect("Failed to launch MD Reader");
 }

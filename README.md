@@ -64,6 +64,33 @@ Zoom changes are previewed live in the percentage label during drag and committe
 
 ---
 
+## Installation
+
+### Windows — Installer (recommended)
+1. Download `MDReader-x.y.z-x86_64.msi` from [Releases](https://github.com/ophiocus/MDReader/releases)
+2. Run the installer — no configuration needed
+3. After installation:
+   - MDReader appears in the **Start Menu**
+   - Right-clicking any folder (or the background inside a folder) in Explorer shows **"Open with MD Reader"** in the context menu — opens the app rooted at that folder
+   - The app **checks for updates automatically** on each launch and shows a one-click install prompt in the status bar when a new version is available
+
+### Windows — Portable
+Download `mdreader.exe` from Releases and run directly. No installation required. Config is saved to `%APPDATA%\MDReader\config.json`. Context menu and auto-update are not available in portable mode.
+
+### Linux
+```bash
+sudo dpkg -i mdreader_*.deb
+```
+
+### macOS
+Download and unzip `MDReader-macOS.zip`, drag `MDReader.app` to Applications.
+> On first launch, right-click → Open to bypass Gatekeeper (the app is currently unsigned).
+
+### Auto-update (Windows MSI)
+On startup MDReader silently checks [GitHub Releases](https://github.com/ophiocus/MDReader/releases) in a background thread. If a newer version is found, the status bar shows a green **"↑ vX.Y available — click to install"** label. Clicking it downloads the new `.msi` and runs the Windows Installer in passive mode (brief progress dialog), then exits. The update completes without any further interaction.
+
+---
+
 ## Requirements
 
 - Windows 10 or 11 (64-bit)

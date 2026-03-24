@@ -4,6 +4,39 @@ All notable changes to MDReader are documented here.
 
 ---
 
+## [0.2.0] — 2026-03-23
+
+#### Added
+- **Windows MSI installer** via `cargo-wix` — produces a standard Windows
+  Installer package with Start Menu shortcut, per-machine installation, and
+  automatic major-upgrade handling
+- **Explorer context menu** — two registry components registered by the MSI:
+  - `Directory\shell\MDReader` — "Open with MD Reader" appears when
+    right-clicking any folder in Explorer; passes the folder path as `%1`
+  - `Directory\Background\shell\MDReader` — same entry for right-clicking
+    the background inside an open folder; passes `%V`
+  Both entries are cleanly removed on uninstall
+- **CLI argument support** — `main()` reads `argv[1]`; if it is a valid
+  directory path the app overrides `config.root_path` and saves, enabling
+  the context menu integration to open the app rooted at the clicked folder
+- **Auto-update checker** — on startup a background thread queries the
+  GitHub Releases API (`/repos/ophiocus/MDReader/releases/latest`).
+  If the latest tag is newer than `CARGO_PKG_VERSION`, the status bar shows
+  a green "↑ vX.Y available — click to install" label. Clicking it
+  downloads the `.msi` to `%TEMP%` and runs `msiexec /passive /norestart`,
+  then exits — the update completes with a brief Windows Installer progress
+  dialog and no further interaction. States: `Checking → Available |
+  Idle → Downloading`
+- **`reqwest 0.12`** dependency added (blocking, json, rustls-tls features)
+  for both the update check and MSI download
+- **README Installation section** — covers Windows MSI, Windows portable,
+  Linux `.deb`, macOS `.app`, and auto-update behaviour
+- **GitHub Actions** — `build-windows` job now also installs `cargo-wix`,
+  builds the MSI (`cargo wix --nocapture`), uploads it as
+  `mdreader-windows-msi`, and includes `*.msi` in the GitHub Release
+
+---
+
 ## [0.1.0] — 2026-03-22
 
 ### Session 1 — Initial build
