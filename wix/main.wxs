@@ -60,7 +60,7 @@
 
     <Product
         Id='*'
-        Name='mdreader'
+        Name='MD Reader'
         UpgradeCode='5F630701-DE3C-459D-AA3B-B8EF9E2F2E07'
         Manufacturer='ophiocus'
         Language='1033'
@@ -127,10 +127,10 @@
                         <RegistryKey Root='HKLM' Key='SOFTWARE\Classes\Directory\shell\MDReader'
                                      ForceCreateOnInstall='yes' ForceDeleteOnUninstall='yes'>
                             <RegistryValue Type='string' Value='Open with MD Reader' KeyPath='yes' />
-                            <RegistryValue Type='string' Name='Icon' Value='"[INSTALLDIR]mdreader.exe",0' />
+                            <RegistryValue Type='string' Name='Icon' Value='"[Bin]mdreader.exe",0' />
                         </RegistryKey>
                         <RegistryKey Root='HKLM' Key='SOFTWARE\Classes\Directory\shell\MDReader\command'>
-                            <RegistryValue Type='string' Value='"[INSTALLDIR]mdreader.exe" "%1"' />
+                            <RegistryValue Type='string' Value='"[Bin]mdreader.exe" "%1"' />
                         </RegistryKey>
                     </Component>
 
@@ -138,10 +138,10 @@
                         <RegistryKey Root='HKLM' Key='SOFTWARE\Classes\Directory\Background\shell\MDReader'
                                      ForceCreateOnInstall='yes' ForceDeleteOnUninstall='yes'>
                             <RegistryValue Type='string' Value='Open with MD Reader' KeyPath='yes' />
-                            <RegistryValue Type='string' Name='Icon' Value='"[INSTALLDIR]mdreader.exe",0' />
+                            <RegistryValue Type='string' Name='Icon' Value='"[Bin]mdreader.exe",0' />
                         </RegistryKey>
                         <RegistryKey Root='HKLM' Key='SOFTWARE\Classes\Directory\Background\shell\MDReader\command'>
-                            <RegistryValue Type='string' Value='"[INSTALLDIR]mdreader.exe" "%V"' />
+                            <RegistryValue Type='string' Value='"[Bin]mdreader.exe" "%V"' />
                         </RegistryKey>
                     </Component>
                 </Directory>
@@ -187,8 +187,8 @@
           The product icon is the graphic that appears in the Add/Remove
           Programs control panel for the application.
         -->
-        <!--<Icon Id='ProductICO' SourceFile='wix\Product.ico'/>-->
-        <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
+        <Icon Id='ProductICO' SourceFile='assets\icon.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='ProductICO' />
 
         
         <!--
@@ -200,7 +200,7 @@
           2. Change the value for `Value` attribute of the following
              `Property` tag to a valid URL.
         -->
-        <!--<Property Id='ARPHELPLINK' Value='ChangeMe'/>-->
+        <Property Id='ARPHELPLINK' Value='https://github.com/ophiocus/MDReader'/>
 
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>
