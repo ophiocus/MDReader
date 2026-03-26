@@ -4,6 +4,37 @@ All notable changes to MDReader are documented here.
 
 ---
 
+## [0.2.1] — 2026-03-26
+
+### Fixed
+
+- **Context menu "Application not found" error** — the WiX template used
+  `[INSTALLDIR]` as the path prefix for all four registry values (the
+  `Directory\shell` and `Directory\Background\shell` command entries plus
+  their icon declarations). `[INSTALLDIR]` is not a valid WiX/MSI property;
+  it expanded to an empty string at install time, leaving the registry with
+  bare `"mdreader.exe" "%1"` entries that Windows could not resolve.
+
+  The correct property is `[Bin]`, the WiX `Directory` element whose
+  `Id='Bin'` maps to `C:\Program Files\mdreader\bin\` — the actual
+  location of the installed executable. All four references replaced.
+
+  **Root cause in brief:** cargo-wix places the binary one level deeper
+  than `APPLICATIONFOLDER` (in a `bin\` subdirectory) to allow the optional
+  PATH component to add just that subdirectory. The auto-generated template
+  comment does not make this distinction obvious. Any registry value
+  referencing the executable must use `[Bin]`, not `[APPLICATIONFOLDER]`
+  or any assumed `INSTALLDIR` alias.
+
+- **Product name in Add/Remove Programs** was `mdreader` (Cargo crate name);
+  corrected to `MD Reader`
+- **MSI icon** not shown in Add/Remove Programs; wired `assets\icon.ico`
+  to the `ARPPRODUCTICON` property
+- **No help link** in Add/Remove Programs; `ARPHELPLINK` set to
+  `https://github.com/ophiocus/MDReader`
+
+---
+
 ## [0.2.0] — 2026-03-23
 
 #### Added
