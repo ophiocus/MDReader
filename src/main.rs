@@ -142,14 +142,33 @@ impl FileNode {
     }
 }
 
-/// Collect all markdown file paths from a tree in depth-first order,
-/// paired with their nesting depth (0 = root level).
-fn collect_md_entries(nodes: &[FileNode], depth: usize) -> Vec<(PathBuf, usize)> {
+/// An entry in the document collection — either a directory group heading
+/// or an actual markdown file.
+#[derive(Debug, Clone)]
+enum DocEntry {
+    /// Directory group heading (no content to render, just TOC structure).
+    Section { name: String, #[allow(dead_code)] dir_path: PathBuf, depth: usize },
+    /// A markdown document to render.
+    Document { path: PathBuf, depth: usize },
+}
+
+/// Collect all entries from the tree: directories as Section headings,
+/// files as Documents.  Depth tracks nesting level.
+fn collect_doc_entries(nodes: &[FileNode], depth: usize) -> Vec<DocEntry> {
     let mut out = Vec::new();
     for node in nodes {
         match &node.kind {
-            NodeKind::File => out.push((node.path.clone(), depth)),
-            NodeKind::Dir(children) => out.extend(collect_md_entries(children, depth + 1)),
+            NodeKind::File => {
+                out.push(DocEntry::Document { path: node.path.clone(), depth });
+            }
+            NodeKind::Dir(children) => {
+                out.push(DocEntry::Section {
+                    name: node.name.clone(),
+                    dir_path: node.path.clone(),
+                    depth,
+                });
+                out.extend(collect_doc_entries(children, depth + 1));
+            }
         }
     }
     out
@@ -463,12 +482,14 @@ fn html_page(body: &str, title: &str) -> String {
   hr {{ border: none; border-top: 1px solid #ddd; margin: 2em 0; }}
   img {{ max-width: 100%; }}
   .toc {{ margin-bottom: 2em; }}
-  .toc h2 {{ border-bottom: 2px solid #e0e0e0; padding-bottom: .3em; }}
-  .toc ul {{ padding-left: 1.5em; list-style: none; }}
+  .toc h1 {{ font-size: 1.6em; border-bottom: 2px solid #333; padding-bottom: .3em; }}
+  .toc ul {{ padding-left: 1.4em; list-style: none; margin: 0.2em 0; }}
   .toc .toc-root {{ padding-left: 0; }}
-  .toc li {{ margin: 0.3em 0; }}
+  .toc li {{ margin: 0.25em 0; line-height: 1.5; }}
+  .toc .toc-section {{ margin-top: 0.8em; font-size: 1.05em; }}
   .toc a {{ color: #1a73e8; text-decoration: none; }}
   .toc a:hover {{ text-decoration: underline; }}
+  .doc-title {{ page-break-after: avoid; }}
 </style>
 </head>
 <body>
@@ -680,14 +701,18 @@ fn strip_inline_toc(content: &str) -> String {
     out.join("\n")
 }
 
-/// Build a path→anchor lookup from the collected entries.
-/// Used to rewrite relative `[text](path.md)` links to `#doc-N`.
-fn build_path_map(entries: &[(PathBuf, usize)]) -> std::collections::HashMap<PathBuf, String> {
-    entries
-        .iter()
-        .enumerate()
-        .map(|(i, (p, _))| (p.clone(), format!("doc-{i}")))
-        .collect()
+/// Build a path→anchor lookup from document entries.
+fn build_path_map(entries: &[DocEntry]) -> HashMap<PathBuf, String> {
+    let mut map = HashMap::new();
+    let mut doc_idx = 0usize;
+    for entry in entries {
+        if let DocEntry::Document { path, .. } = entry {
+            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            map.insert(canon, format!("doc-{doc_idx}"));
+            doc_idx += 1;
+        }
+    }
+    map
 }
 
 /// Rewrite relative `.md` links in markdown content to `#anchor` references.
@@ -793,12 +818,12 @@ fn rewrite_md_links(
 
 // ─── pdf export ──────────────────────────────────────────────────────────────
 
-/// Export all markdown files in the tree as a single PDF with a smart
+/// Export all markdown files in the tree as a single PDF with a clean
 /// hierarchical table of contents.  Every transformation is wrapped in a
 /// try/default pattern: if detection or rewriting fails for a given file
 /// the original content is used verbatim.
 fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
-    let entries = collect_md_entries(tree, 0);
+    let entries = collect_doc_entries(tree, 0);
     if entries.is_empty() {
         return Err("No markdown files to export.".to_string());
     }
@@ -811,173 +836,174 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
         .save_file()
         .ok_or_else(|| "Export cancelled.".to_string())?;
 
-    // ── 2. build path→anchor map (best-effort canonicalization) ────────────
-    let canon_entries: Vec<(PathBuf, usize)> = entries
-        .iter()
-        .map(|(p, d)| (p.canonicalize().unwrap_or_else(|_| p.clone()), *d))
-        .collect();
-    let path_map = build_path_map(&canon_entries);
+    // ── 2. build path→anchor map ───────────────────────────────────────────
+    let path_map = build_path_map(&entries);
 
-    // ── 3. process each file ───────────────────────────────────────────────
+    // ── 3. comrak options ──────────────────────────────────────────────────
     let mut opts = comrak::Options::default();
     opts.extension.table = true;
     opts.extension.strikethrough = true;
     opts.extension.autolink = true;
     opts.extension.tasklist = true;
 
-    struct TocEntry {
-        anchor: String,
-        display: String,
+    // ── 4. build TOC + body in a single pass ───────────────────────────────
+    //
+    // TOC entries:  (depth, display_name, anchor_or_none)
+    //   - Section  → bold group heading, no link
+    //   - Document → clickable link to #anchor
+    //
+    // Body sections: only Documents produce rendered HTML.
+
+    struct TocItem {
         depth: usize,
-        is_nav: bool,
+        display: String,
+        anchor: Option<String>, // None = section heading
     }
 
-    let mut toc: Vec<TocEntry> = Vec::new();
-    let mut sections = String::new();
+    let mut toc_items: Vec<TocItem> = Vec::new();
+    let mut body_html = String::new();
+    let mut doc_idx = 0usize;
 
-    for (i, (path, depth)) in entries.iter().enumerate() {
-        let raw_content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-
-        let anchor = format!("doc-{i}");
-
-        // Try: for README.md files, use the parent directory's cleaned name
-        // as the display; for regular files, extract the first # heading.
-        // Default: file stem → title case.
-        let is_readme = path.file_name()
-            .map(|n| n.to_string_lossy().to_lowercase() == "readme.md")
-            .unwrap_or(false);
-        let display = if is_readme {
-            // Try dir name cleaning; fall back to heading extraction
-            path.parent()
-                .and_then(|p| p.file_name())
-                .map(|n| dir_display_name(&n.to_string_lossy()))
-                .unwrap_or_else(|| display_name_for(&raw_content, path))
-        } else {
-            display_name_for(&raw_content, path)
-        };
-
-        // Try: detect nav-only README; default: false (treat as content)
-        let nav = is_nav_only(&raw_content, path);
-
-        toc.push(TocEntry {
-            anchor: anchor.clone(),
-            display: display.clone(),
-            depth: *depth,
-            is_nav: nav,
-        });
-
-        // Prepare content for this section.
-        // Safety net: if any transformation loses >40% of the content length,
-        // fall back to the raw markdown — better to have duplicate TOC entries
-        // than mangled content.
-        let processed = if nav {
-            let intro = extract_intro(&raw_content);
-            // Nav-only with no intro → will be skipped below
-            intro
-        } else {
-            let stripped = strip_inline_toc(&raw_content);
-            let file_dir = path.parent().unwrap_or(path);
-            let rewritten = rewrite_md_links(&stripped, file_dir, &path_map);
-
-            // Safety net: if we lost too much content, use raw
-            if rewritten.len() < raw_content.len() * 60 / 100 {
-                raw_content.clone()
-            } else {
-                rewritten
+    for entry in &entries {
+        match entry {
+            DocEntry::Section { name, depth, .. } => {
+                toc_items.push(TocItem {
+                    depth: *depth,
+                    display: dir_display_name(name),
+                    anchor: None,
+                });
             }
-        };
+            DocEntry::Document { path, depth } => {
+                let raw_content = fs::read_to_string(path)
+                    .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
 
-        // Skip entirely empty sections (nav READMEs with no intro prose)
-        if processed.trim().is_empty() {
-            continue;
-        }
+                let anchor = format!("doc-{doc_idx}");
+                doc_idx += 1;
 
-        // Strip the first `# heading` line from the content to avoid a
-        // duplicate title (we already inject our own <h1>).
-        let final_content = {
-            let mut lines = processed.lines();
-            let mut skipped = false;
-            let mut out = String::new();
-            for line in &mut lines {
-                if !skipped && line.trim().starts_with("# ") && !line.trim().starts_with("##") {
-                    skipped = true;
+                // Display name: first # heading, fallback to file stem
+                let display = display_name_for(&raw_content, path);
+
+                // Detect nav-only READMEs
+                let nav = is_nav_only(&raw_content, path);
+
+                toc_items.push(TocItem {
+                    depth: *depth,
+                    display: display.clone(),
+                    anchor: if nav { None } else { Some(anchor.clone()) },
+                });
+
+                // Prepare content
+                let processed = if nav {
+                    extract_intro(&raw_content)
+                } else {
+                    let stripped = strip_inline_toc(&raw_content);
+                    let file_dir = path.parent().unwrap_or(path);
+                    let rewritten = rewrite_md_links(&stripped, file_dir, &path_map);
+                    // Safety net
+                    if rewritten.len() < raw_content.len() * 60 / 100 {
+                        raw_content.clone()
+                    } else {
+                        rewritten
+                    }
+                };
+
+                if processed.trim().is_empty() {
                     continue;
                 }
-                out.push_str(line);
-                out.push('\n');
-            }
-            if skipped { out } else { processed }
-        };
 
-        // Page break before each section except the first
-        if !sections.is_empty() {
-            sections.push_str("<div style=\"page-break-before:always\"></div>\n");
+                // Strip duplicate first # heading
+                let final_content = {
+                    let mut found = false;
+                    let mut out = String::new();
+                    for line in processed.lines() {
+                        if !found && line.trim().starts_with("# ")
+                            && !line.trim().starts_with("##")
+                        {
+                            found = true;
+                            continue;
+                        }
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                    if found { out } else { processed }
+                };
+
+                // Page break before each section except the first
+                if !body_html.is_empty() {
+                    body_html.push_str(
+                        "<div style=\"page-break-before:always\"></div>\n",
+                    );
+                }
+
+                // Section heading level: h1 for depth 0-1, h2 for depth 2+
+                let tag = if *depth <= 1 { "h1" } else { "h2" };
+                body_html.push_str(&format!(
+                    "<{tag} id=\"{anchor}\" class=\"doc-title\">{display}</{tag}>\n"
+                ));
+                body_html.push_str(&comrak::markdown_to_html(&final_content, &opts));
+            }
         }
-        sections.push_str(&format!(
-            "<h1 id=\"{anchor}\" style=\"margin-top:0.5em\">{display}</h1>\n"
-        ));
-        sections.push_str(&comrak::markdown_to_html(&final_content, &opts));
     }
 
-    // ── 4. build hierarchical TOC ──────────────────────────────────────────
+    // ── 5. build hierarchical TOC HTML ─────────────────────────────────────
     let mut toc_html = String::from(
-        "<nav class=\"toc\">\n<h2>Table of Contents</h2>\n<ul class=\"toc-root\">\n",
+        "<nav class=\"toc\">\n<h1>Table of Contents</h1>\n",
     );
     let mut current_depth: Option<usize> = None;
     let mut open_uls = 0u32;
 
-    for entry in &toc {
-        // Skip nav-only entries that produced no content
-        if entry.is_nav {
-            // Still include as a group heading if it has a nice name
-            // but don't make it a link — it has no rendered content worth jumping to
-        }
+    // Open the root list
+    toc_html.push_str("<ul class=\"toc-root\">\n");
 
-        let target_depth = entry.depth;
+    for item in &toc_items {
+        let d = item.depth;
 
         match current_depth {
             None => {
-                current_depth = Some(target_depth);
+                current_depth = Some(d);
             }
             Some(cd) => {
-                if target_depth > cd {
-                    for _ in 0..(target_depth - cd) {
+                if d > cd {
+                    for _ in 0..(d - cd) {
                         toc_html.push_str("<ul>\n");
                         open_uls += 1;
                     }
-                } else if target_depth < cd {
-                    for _ in 0..(cd - target_depth) {
-                        toc_html.push_str("</ul>\n");
-                        if open_uls > 0 {
-                            open_uls -= 1;
-                        }
+                } else if d < cd {
+                    let close = (cd - d).min(open_uls as usize);
+                    for _ in 0..close {
+                        toc_html.push_str("</ul></li>\n");
+                        open_uls -= 1;
                     }
                 }
-                current_depth = Some(target_depth);
+                current_depth = Some(d);
             }
         }
 
-        if entry.is_nav {
-            toc_html.push_str(&format!(
-                "  <li><strong>{}</strong></li>\n",
-                entry.display
-            ));
-        } else {
-            toc_html.push_str(&format!(
-                "  <li><a href=\"#{}\">{}</a></li>\n",
-                entry.anchor, entry.display
-            ));
+        match &item.anchor {
+            Some(anchor) => {
+                toc_html.push_str(&format!(
+                    "  <li><a href=\"#{anchor}\">{}</a></li>\n",
+                    item.display
+                ));
+            }
+            None => {
+                // Section heading — bold, not a link
+                toc_html.push_str(&format!(
+                    "  <li class=\"toc-section\"><strong>{}</strong>\n",
+                    item.display
+                ));
+                // Don't close </li> — nested <ul> will follow
+            }
         }
     }
 
-    // Close any remaining nested <ul>s
+    // Close all remaining open lists
     for _ in 0..open_uls {
-        toc_html.push_str("</ul>\n");
+        toc_html.push_str("</ul></li>\n");
     }
     toc_html.push_str("</ul>\n</nav>\n<div style=\"page-break-after:always\"></div>\n");
 
-    let full_body = format!("{toc_html}{sections}");
+    let full_body = format!("{toc_html}{body_html}");
     let html = html_page(&full_body, root_name);
 
     // ── 5. write temp HTML ─────────────────────────────────────────────────
