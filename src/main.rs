@@ -71,9 +71,17 @@ fn download_and_install(url: &str, version: &str) -> Result<PathBuf, String> {
     std::fs::write(&path, &bytes)
         .map_err(|e| format!("Failed to write MSI: {e}"))?;
 
-    // Launch installer and exit so it can replace the running binary.
-    std::process::Command::new("msiexec")
-        .args(["/i", path.to_str().unwrap_or(""), "/passive", "/norestart"])
+    // Launch installer elevated via powershell Start-Process -Verb RunAs.
+    // Plain `msiexec` from a non-elevated process silently fails on
+    // per-machine installs because /passive suppresses the UAC prompt.
+    let msi_str = path.to_string_lossy();
+    std::process::Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            &format!(
+                "Start-Process msiexec -ArgumentList '/i \"{msi_str}\" /passive /norestart' -Verb RunAs"
+            ),
+        ])
         .spawn()
         .map_err(|e| format!("Failed to launch installer: {e}"))?;
 
