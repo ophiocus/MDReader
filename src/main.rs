@@ -212,19 +212,15 @@ fn render_siblings(
 
         match &mut node.kind {
             NodeKind::Dir(children) => {
-                // --- Folder: prominent visual style ---
-                ui.add_space(4.0);
-
-                // Drag handle + folder heading in a horizontal row
                 let dir_path = node.path.clone();
                 let header_text = dir_display_name(&node.name);
 
-                let resp = ui.horizontal(|ui| {
-                    // Drag handle
+                // Drag handle before the collapsing header
+                ui.horizontal(|ui| {
                     let handle = ui.add(
                         egui::Label::new(
                             RichText::new("⠿")
-                                .size(14.0)
+                                .size(12.0)
                                 .color(if is_being_dragged {
                                     Color32::from_rgb(80, 170, 255)
                                 } else {
@@ -238,16 +234,14 @@ fn render_siblings(
                         *drag_source = Some((parent_path.to_path_buf(), idx));
                     }
 
-                    // Drop target: if dragging a sibling, detect hover
+                    // Drop target on handle
                     if let Some((ref dp, src_idx)) = *drag_source {
                         if dp == parent_path && src_idx != idx && handle.hovered() {
-                            // Show drop indicator
                             ui.painter().rect_stroke(
                                 handle.rect.expand(2.0),
                                 2.0,
                                 egui::Stroke::new(2.0, Color32::from_rgb(80, 170, 255)),
                             );
-
                             if ui.input(|i| i.pointer.any_released()) {
                                 action = Some(SidebarAction::Reorder {
                                     parent: parent_path.to_path_buf(),
@@ -258,38 +252,14 @@ fn render_siblings(
                             }
                         }
                     }
-
-                    // Folder name — prominent
-                    ui.label(
-                        RichText::new(format!("📁 {header_text}"))
-                            .size(13.0)
-                            .strong()
-                            .color(Color32::from_rgb(200, 180, 120)),
-                    );
                 });
 
-                // Check the drop on the whole horizontal row too
-                if let Some((ref dp, src_idx)) = *drag_source {
-                    if dp == parent_path && src_idx != idx && resp.response.hovered() {
-                        ui.painter().rect_stroke(
-                            resp.response.rect.expand(1.0),
-                            2.0,
-                            egui::Stroke::new(1.5, Color32::from_rgb(80, 170, 255)),
-                        );
-                        if ui.input(|i| i.pointer.any_released()) {
-                            action = Some(SidebarAction::Reorder {
-                                parent: parent_path.to_path_buf(),
-                                from: src_idx,
-                                to: idx,
-                            });
-                            *drag_source = None;
-                        }
-                    }
-                }
-
-                // Collapsible children
+                // Folder as collapsing header — prominent style
                 let child_resp = egui::CollapsingHeader::new(
-                    RichText::new("").size(0.0), // invisible — heading is above
+                    RichText::new(format!("📁 {header_text}"))
+                        .size(13.0)
+                        .strong()
+                        .color(Color32::from_rgb(200, 180, 120)),
                 )
                 .id_source(id)
                 .default_open(true)
@@ -302,8 +272,6 @@ fn render_siblings(
                         action = Some(child_action);
                     }
                 }
-
-                ui.add_space(2.0);
             }
 
             NodeKind::File => {
