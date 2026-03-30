@@ -202,7 +202,7 @@ fn render_siblings(
 
     for idx in 0..node_count {
         let node = &mut nodes[idx];
-        let is_being_dragged = drag_source
+        let _is_being_dragged = drag_source
             .as_ref()
             .map(|(p, i)| p == parent_path && *i == idx)
             .unwrap_or(false);
@@ -215,48 +215,9 @@ fn render_siblings(
                 let dir_path = node.path.clone();
                 let header_text = dir_display_name(&node.name);
 
-                // Drag handle before the collapsing header
-                ui.horizontal(|ui| {
-                    let handle = ui.add(
-                        egui::Label::new(
-                            RichText::new("⠿")
-                                .size(12.0)
-                                .color(if is_being_dragged {
-                                    Color32::from_rgb(80, 170, 255)
-                                } else {
-                                    Color32::from_rgb(120, 120, 130)
-                                }),
-                        )
-                        .sense(egui::Sense::drag()),
-                    );
-
-                    if handle.drag_started() {
-                        *drag_source = Some((parent_path.to_path_buf(), idx));
-                    }
-
-                    // Drop target on handle
-                    if let Some((ref dp, src_idx)) = *drag_source {
-                        if dp == parent_path && src_idx != idx && handle.hovered() {
-                            ui.painter().rect_stroke(
-                                handle.rect.expand(2.0),
-                                2.0,
-                                egui::Stroke::new(2.0, Color32::from_rgb(80, 170, 255)),
-                            );
-                            if ui.input(|i| i.pointer.any_released()) {
-                                action = Some(SidebarAction::Reorder {
-                                    parent: parent_path.to_path_buf(),
-                                    from: src_idx,
-                                    to: idx,
-                                });
-                                *drag_source = None;
-                            }
-                        }
-                    }
-                });
-
-                // Folder as collapsing header — prominent style
+                // Folder as collapsing header — prominent style, with move arrows
                 let child_resp = egui::CollapsingHeader::new(
-                    RichText::new(format!("📁 {header_text}"))
+                    RichText::new(format!("{header_text}"))
                         .size(13.0)
                         .strong()
                         .color(Color32::from_rgb(200, 180, 120)),
@@ -264,6 +225,27 @@ fn render_siblings(
                 .id_source(id)
                 .default_open(true)
                 .show(ui, |ui| {
+                    // Move arrows at the top of the folder's children
+                    ui.horizontal(|ui| {
+                        if idx > 0 {
+                            if ui.small_button("^").on_hover_text("Move up").clicked() {
+                                action = Some(SidebarAction::Reorder {
+                                    parent: parent_path.to_path_buf(),
+                                    from: idx,
+                                    to: idx - 1,
+                                });
+                            }
+                        }
+                        if idx + 1 < node_count {
+                            if ui.small_button("v").on_hover_text("Move down").clicked() {
+                                action = Some(SidebarAction::Reorder {
+                                    parent: parent_path.to_path_buf(),
+                                    from: idx,
+                                    to: idx + 1,
+                                });
+                            }
+                        }
+                    });
                     render_siblings(ui, children, selected, &dir_path, drag_source)
                 });
 
@@ -278,82 +260,41 @@ fn render_siblings(
                 let is_selected = selected.as_ref() == Some(&node.path);
                 let node_path = node.path.clone();
 
-                let resp = ui.horizontal(|ui| {
-                    // Drag handle
-                    let handle = ui.add(
-                        egui::Label::new(
-                            RichText::new("⠿")
-                                .size(11.0)
-                                .color(if is_being_dragged {
-                                    Color32::from_rgb(80, 170, 255)
-                                } else {
-                                    Color32::from_rgb(90, 90, 100)
-                                }),
-                        )
-                        .sense(egui::Sense::drag()),
-                    );
-
-                    if handle.drag_started() {
-                        *drag_source = Some((parent_path.to_path_buf(), idx));
+                ui.horizontal(|ui| {
+                    // Move arrows
+                    if idx > 0 {
+                        if ui.small_button("^").on_hover_text("Move up").clicked() {
+                            action = Some(SidebarAction::Reorder {
+                                parent: parent_path.to_path_buf(),
+                                from: idx,
+                                to: idx - 1,
+                            });
+                        }
                     }
-
-                    // Drop target
-                    if let Some((ref dp, src_idx)) = *drag_source {
-                        if dp == parent_path && src_idx != idx && handle.hovered() {
-                            ui.painter().rect_stroke(
-                                handle.rect.expand(2.0),
-                                2.0,
-                                egui::Stroke::new(2.0, Color32::from_rgb(80, 170, 255)),
-                            );
-                            if ui.input(|i| i.pointer.any_released()) {
-                                action = Some(SidebarAction::Reorder {
-                                    parent: parent_path.to_path_buf(),
-                                    from: src_idx,
-                                    to: idx,
-                                });
-                                *drag_source = None;
-                            }
+                    if idx + 1 < node_count {
+                        if ui.small_button("v").on_hover_text("Move down").clicked() {
+                            action = Some(SidebarAction::Reorder {
+                                parent: parent_path.to_path_buf(),
+                                from: idx,
+                                to: idx + 1,
+                            });
                         }
                     }
 
                     // File label
                     let label = if is_selected {
-                        RichText::new(format!("📄 {}", node.name))
+                        RichText::new(&node.name)
                             .color(Color32::from_rgb(80, 170, 255))
                     } else {
-                        RichText::new(format!("📄 {}", node.name))
+                        RichText::new(&node.name)
                     };
 
                     if ui.selectable_label(is_selected, label).clicked() {
                         action = Some(SidebarAction::LoadFile(node_path));
                     }
                 });
-
-                // Drop target on whole row
-                if let Some((ref dp, src_idx)) = *drag_source {
-                    if dp == parent_path && src_idx != idx && resp.response.hovered() {
-                        ui.painter().rect_stroke(
-                            resp.response.rect.expand(1.0),
-                            2.0,
-                            egui::Stroke::new(1.5, Color32::from_rgb(80, 170, 255)),
-                        );
-                        if ui.input(|i| i.pointer.any_released()) {
-                            action = Some(SidebarAction::Reorder {
-                                parent: parent_path.to_path_buf(),
-                                from: src_idx,
-                                to: idx,
-                            });
-                            *drag_source = None;
-                        }
-                    }
-                }
             }
         }
-    }
-
-    // Clear drag on release anywhere
-    if ui.input(|i| i.pointer.any_released()) {
-        *drag_source = None;
     }
 
     action
