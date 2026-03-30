@@ -119,6 +119,18 @@ impl FileNode {
     }
 }
 
+/// Collect all markdown file paths from a tree in depth-first order.
+fn collect_md_paths(nodes: &[FileNode]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match &node.kind {
+            NodeKind::File => out.push(node.path.clone()),
+            NodeKind::Dir(children) => out.extend(collect_md_paths(children)),
+        }
+    }
+    out
+}
+
 fn build_tree(root: &str) -> Vec<FileNode> {
     let path = Path::new(root);
     if !path.is_dir() {
@@ -279,6 +291,12 @@ fn html_page(body: &str, title: &str) -> String {
                 padding-left: 1em; color: #555; }}
   hr {{ border: none; border-top: 1px solid #ddd; margin: 2em 0; }}
   img {{ max-width: 100%; }}
+  .toc {{ margin-bottom: 2em; }}
+  .toc h2 {{ border-bottom: 2px solid #e0e0e0; padding-bottom: .3em; }}
+  .toc ol {{ padding-left: 1.5em; }}
+  .toc li {{ margin: 0.3em 0; }}
+  .toc a {{ color: #1a73e8; text-decoration: none; }}
+  .toc a:hover {{ text-decoration: underline; }}
 </style>
 </head>
 <body>
@@ -332,6 +350,85 @@ fn export_pdf(content: &str, source_path: &Path) -> Result<PathBuf, String> {
     // ── 4. Chrome / Edge headless → PDF ───────────────────────────────────
     let chrome = find_chrome()
         .ok_or_else(|| "Chrome/Edge not found — saved as HTML instead.".to_string())?;
+
+    let out = Command::new(&chrome)
+        .args([
+            "--headless=new",
+            "--disable-gpu",
+            "--no-sandbox",
+            "--disable-software-rasterizer",
+            &format!("--print-to-pdf={}", pdf_path.display()),
+            &format!("file:///{}", tmp_html.display().to_string().replace('\\', "/")),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to launch browser: {e}"))?;
+
+    let _ = fs::remove_file(&tmp_html);
+
+    if out.status.success() || pdf_path.exists() {
+        Ok(pdf_path)
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        Err(format!("Browser error: {stderr}"))
+    }
+}
+
+/// Export all markdown files in the tree as a single PDF with a table of contents.
+fn export_all_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
+    let paths = collect_md_paths(tree);
+    if paths.is_empty() {
+        return Err("No markdown files to export.".to_string());
+    }
+
+    // ── 1. pick save location ──────────────────────────────────────────────
+    let default_name = format!("{root_name}.pdf");
+    let pdf_path = rfd::FileDialog::new()
+        .add_filter("PDF", &["pdf"])
+        .set_file_name(&default_name)
+        .save_file()
+        .ok_or_else(|| "Export cancelled.".to_string())?;
+
+    // ── 2. build TOC + concatenated HTML ───────────────────────────────────
+    let opts = comrak::Options::default();
+    let mut toc_entries: Vec<(String, String)> = Vec::new(); // (anchor, display_name)
+    let mut sections = String::new();
+
+    for (i, path) in paths.iter().enumerate() {
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let anchor = format!("doc-{i}");
+
+        toc_entries.push((anchor.clone(), name.clone()));
+
+        // Section divider (page break before each file except the first)
+        if i > 0 {
+            sections.push_str("<div style=\"page-break-before:always\"></div>\n");
+        }
+        sections.push_str(&format!(
+            "<h1 id=\"{anchor}\" style=\"margin-top:0.5em\">{name}</h1>\n"
+        ));
+        sections.push_str(&comrak::markdown_to_html(&content, &opts));
+    }
+
+    // Build TOC HTML
+    let mut toc_html = String::from("<nav class=\"toc\">\n<h2>Table of Contents</h2>\n<ol>\n");
+    for (anchor, name) in &toc_entries {
+        toc_html.push_str(&format!("  <li><a href=\"#{anchor}\">{name}</a></li>\n"));
+    }
+    toc_html.push_str("</ol>\n</nav>\n<div style=\"page-break-after:always\"></div>\n");
+
+    let full_body = format!("{toc_html}{sections}");
+    let html = html_page(&full_body, root_name);
+
+    // ── 3. write temp HTML ─────────────────────────────────────────────────
+    let tmp_html = std::env::temp_dir().join("mdreader_export_all.html");
+    fs::write(&tmp_html, &html)
+        .map_err(|e| format!("Failed to write temp HTML: {e}"))?;
+
+    // ── 4. Chrome / Edge headless → PDF ───────────────────────────────────
+    let chrome = find_chrome()
+        .ok_or_else(|| "Chrome/Edge not found — cannot generate PDF.".to_string())?;
 
     let out = Command::new(&chrome)
         .args([
@@ -535,6 +632,25 @@ impl eframe::App for MDReaderApp {
                                 Err(e) => {
                                     self.status_msg = Some(format!("✘ {e}"));
                                 }
+                            }
+                        }
+                        ui.close_menu();
+                    }
+
+                    // Export all files as single PDF with TOC.
+                    let has_files = !self.tree.is_empty();
+                    if ui
+                        .add_enabled(has_files, egui::Button::new("⬇  Export All as PDF…"))
+                        .clicked()
+                    {
+                        let root_name = self.root_display_name();
+                        match export_all_pdf(&self.tree, &root_name) {
+                            Ok(out) => {
+                                self.status_msg =
+                                    Some(format!("✔ PDF saved → {}", out.display()));
+                            }
+                            Err(e) => {
+                                self.status_msg = Some(format!("✘ {e}"));
                             }
                         }
                         ui.close_menu();

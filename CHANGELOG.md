@@ -4,6 +4,20 @@ All notable changes to MDReader are documented here.
 
 ---
 
+## [0.2.2] — 2026-03-30
+
+### Added
+
+- **Export All as PDF** — new File › "Export All as PDF…" menu item that
+  concatenates every markdown file in the sidebar tree into a single PDF
+  with a clickable **Table of Contents** on the first page. Each file
+  starts on a new page with its filename as an `<h1>` heading. The TOC
+  links jump to the corresponding section in the PDF.
+- `collect_md_paths()` helper that walks the `FileNode` tree depth-first
+  and returns all `.md` file paths in sidebar order
+
+---
+
 ## [0.2.1] — 2026-03-26
 
 ### Fixed
