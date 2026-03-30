@@ -137,13 +137,14 @@ impl FileNode {
     }
 }
 
-/// Collect all markdown file paths from a tree in depth-first order.
-fn collect_md_paths(nodes: &[FileNode]) -> Vec<PathBuf> {
+/// Collect all markdown file paths from a tree in depth-first order,
+/// paired with their nesting depth (0 = root level).
+fn collect_md_entries(nodes: &[FileNode], depth: usize) -> Vec<(PathBuf, usize)> {
     let mut out = Vec::new();
     for node in nodes {
         match &node.kind {
-            NodeKind::File => out.push(node.path.clone()),
-            NodeKind::Dir(children) => out.extend(collect_md_paths(children)),
+            NodeKind::File => out.push((node.path.clone(), depth)),
+            NodeKind::Dir(children) => out.extend(collect_md_entries(children, depth + 1)),
         }
     }
     out
@@ -311,7 +312,8 @@ fn html_page(body: &str, title: &str) -> String {
   img {{ max-width: 100%; }}
   .toc {{ margin-bottom: 2em; }}
   .toc h2 {{ border-bottom: 2px solid #e0e0e0; padding-bottom: .3em; }}
-  .toc ol {{ padding-left: 1.5em; }}
+  .toc ul {{ padding-left: 1.5em; list-style: none; }}
+  .toc .toc-root {{ padding-left: 0; }}
   .toc li {{ margin: 0.3em 0; }}
   .toc a {{ color: #1a73e8; text-decoration: none; }}
   .toc a:hover {{ text-decoration: underline; }}
@@ -338,11 +340,246 @@ fn find_chrome() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
-/// Export all markdown files in the tree as a single PDF with a table of contents.
-/// Returns `Ok(path)` on success or `Err(message)` on failure.
+// ─── smart TOC helpers (all fallible → default on failure) ───────────────────
+
+/// Try to extract the first `# heading` from markdown content.
+/// Falls back to the file stem (kebab/snake → title case).
+fn display_name_for(content: &str, path: &Path) -> String {
+    // Try: first line matching `# Some Title`
+    if let Some(title) = content.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# ") && !trimmed.starts_with("##") {
+            Some(trimmed.trim_start_matches("# ").trim().to_string())
+        } else {
+            None
+        }
+    }) {
+        if !title.is_empty() {
+            return title;
+        }
+    }
+    // Default: file stem → title case
+    slug_to_title(&path.file_stem().unwrap_or_default().to_string_lossy())
+}
+
+/// Convert a kebab-case or snake_case slug to Title Case.
+/// E.g. "part-1-vision" → "Part 1 Vision", "ux-analysis" → "Ux Analysis".
+fn slug_to_title(slug: &str) -> String {
+    slug.split(|c: char| c == '-' || c == '_')
+        .filter(|s| !s.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(c) => {
+                    let upper: String = c.to_uppercase().collect();
+                    format!("{upper}{}", chars.as_str())
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Clean a directory name for use as a TOC group heading.
+/// Detects `part-N-slug` pattern → "Part N — Slug".
+/// Falls back to slug_to_title.
+fn dir_display_name(dir_name: &str) -> String {
+    // Try: "part-N-rest" or "part-N-rest-of-name"
+    let lower = dir_name.to_lowercase();
+    if lower.starts_with("part-") {
+        let rest = &dir_name[5..]; // after "part-"
+        if let Some(idx) = rest.find('-') {
+            let num = &rest[..idx];
+            let slug = &rest[idx + 1..];
+            if num.chars().all(|c| c.is_ascii_digit()) {
+                let title = slug_to_title(slug);
+                return format!("Part {num} — {title}");
+            }
+        }
+    }
+    // Default: plain title case
+    slug_to_title(dir_name)
+}
+
+/// Detect whether a markdown file is mostly a navigation page (lists of .md links).
+/// Returns true if >50% of non-blank, non-heading, non-hr lines are .md link lines.
+fn is_nav_only(content: &str) -> bool {
+    let mut link_lines = 0u32;
+    let mut content_lines = 0u32;
+
+    for line in content.lines() {
+        let t = line.trim();
+        if t.is_empty() || t == "---" || t.starts_with('#') {
+            continue;
+        }
+        content_lines += 1;
+        // Matches lines like `- [text](path.md)` or `## [text](path/README.md)`
+        if t.contains("](") && t.contains(".md)") {
+            link_lines += 1;
+        }
+    }
+
+    // Need at least a few lines to judge; if very short, don't strip.
+    content_lines >= 3 && link_lines * 2 > content_lines
+}
+
+/// Extract introductory prose from a navigation README (everything before the
+/// first list/link block). Returns empty string if extraction fails.
+fn extract_intro(content: &str) -> String {
+    let mut intro = String::new();
+    let mut hit_link_block = false;
+
+    for line in content.lines() {
+        let t = line.trim();
+        // Skip the title heading — we use our own
+        if !hit_link_block && t.starts_with("# ") && !t.starts_with("##") && intro.is_empty() {
+            continue;
+        }
+        // Once we hit a link-list line, stop collecting intro
+        if (t.starts_with("- [") || t.starts_with("## [")) && t.contains(".md)") {
+            hit_link_block = true;
+            continue;
+        }
+        if hit_link_block {
+            continue;
+        }
+        intro.push_str(line);
+        intro.push('\n');
+    }
+    intro.trim().to_string()
+}
+
+/// Strip inline TOC blocks from content: contiguous runs of list items
+/// that are links to .md files, plus any immediately preceding heading
+/// like "In this part:" or "Contents".
+fn strip_inline_toc(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::with_capacity(lines.len());
+    let mut i = 0;
+
+    while i < lines.len() {
+        let t = lines[i].trim();
+
+        // Detect a heading followed by a block of .md link lines
+        if t.starts_with('#') && i + 1 < lines.len() {
+            let lower = t.to_lowercase();
+            let is_toc_heading = lower.contains("in this part")
+                || lower.contains("table of contents")
+                || lower.contains("contents");
+
+            if is_toc_heading {
+                // Skip this heading and any following blank + link lines
+                i += 1;
+                while i < lines.len() {
+                    let lt = lines[i].trim();
+                    if lt.is_empty()
+                        || (lt.starts_with("- ") && lt.contains("](") && lt.contains(".md)"))
+                    {
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Standalone link-list blocks (e.g. root README's `## [Part I](...)`)
+        // We keep these — they may contain useful descriptive text around them.
+
+        out.push(lines[i]);
+        i += 1;
+    }
+
+    out.join("\n")
+}
+
+/// Build a path→anchor lookup from the collected entries.
+/// Used to rewrite relative `[text](path.md)` links to `#doc-N`.
+fn build_path_map(entries: &[(PathBuf, usize)]) -> std::collections::HashMap<PathBuf, String> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, (p, _))| (p.clone(), format!("doc-{i}")))
+        .collect()
+}
+
+/// Rewrite relative `.md` links in markdown content to `#anchor` references.
+/// Only rewrites links whose resolved path exists in the path map.
+/// Non-matching links are left untouched.
+fn rewrite_md_links(
+    content: &str,
+    file_dir: &Path,
+    path_map: &std::collections::HashMap<PathBuf, String>,
+) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut rest = content;
+
+    while let Some(start) = rest.find("](") {
+        // Copy everything up to and including the `]`
+        result.push_str(&rest[..=start]);
+        rest = &rest[start + 2..]; // skip `](`
+
+        // Find the closing `)`
+        if let Some(end) = rest.find(')') {
+            let link_target = &rest[..end];
+
+            // Only rewrite if it's a .md link (not http, not anchors, etc.)
+            if link_target.ends_with(".md")
+                || link_target.contains(".md#")
+                || link_target.ends_with("README.md")
+            {
+                // Strip any #fragment from the path for lookup
+                let path_part = link_target.split('#').next().unwrap_or(link_target);
+
+                // Try to resolve relative to the file's directory
+                let resolved = file_dir.join(path_part);
+                let canonical = resolved.canonicalize().ok();
+
+                let mut rewritten = false;
+                if let Some(ref canon) = canonical {
+                    if let Some(anchor) = path_map.get(canon) {
+                        result.push_str("(#");
+                        result.push_str(anchor);
+                        result.push(')');
+                        rest = &rest[end + 1..];
+                        rewritten = true;
+                    }
+                }
+                if !rewritten {
+                    // Default: leave original link intact
+                    result.push('(');
+                    result.push_str(link_target);
+                    result.push(')');
+                    rest = &rest[end + 1..];
+                }
+            } else {
+                // Not a .md link — pass through
+                result.push('(');
+                result.push_str(link_target);
+                result.push(')');
+                rest = &rest[end + 1..];
+            }
+        } else {
+            // No closing `)` — broken link syntax, pass through
+            result.push('(');
+            break;
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+// ─── pdf export ──────────────────────────────────────────────────────────────
+
+/// Export all markdown files in the tree as a single PDF with a smart
+/// hierarchical table of contents.  Every transformation is wrapped in a
+/// try/default pattern: if detection or rewriting fails for a given file
+/// the original content is used verbatim.
 fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
-    let paths = collect_md_paths(tree);
-    if paths.is_empty() {
+    let entries = collect_md_entries(tree, 0);
+    if entries.is_empty() {
         return Err("No markdown files to export.".to_string());
     }
 
@@ -354,43 +591,151 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
         .save_file()
         .ok_or_else(|| "Export cancelled.".to_string())?;
 
-    // ── 2. build TOC + concatenated HTML ───────────────────────────────────
+    // ── 2. build path→anchor map (best-effort canonicalization) ────────────
+    let canon_entries: Vec<(PathBuf, usize)> = entries
+        .iter()
+        .map(|(p, d)| (p.canonicalize().unwrap_or_else(|_| p.clone()), *d))
+        .collect();
+    let path_map = build_path_map(&canon_entries);
+
+    // ── 3. process each file ───────────────────────────────────────────────
     let opts = comrak::Options::default();
-    let mut toc_entries: Vec<(String, String)> = Vec::new();
+
+    struct TocEntry {
+        anchor: String,
+        display: String,
+        depth: usize,
+        is_nav: bool,
+    }
+
+    let mut toc: Vec<TocEntry> = Vec::new();
     let mut sections = String::new();
 
-    for (i, path) in paths.iter().enumerate() {
-        let content = fs::read_to_string(path)
+    for (i, (path, depth)) in entries.iter().enumerate() {
+        let raw_content = fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
-        let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+
         let anchor = format!("doc-{i}");
 
-        toc_entries.push((anchor.clone(), name.clone()));
+        // Try: for README.md files, use the parent directory's cleaned name
+        // as the display; for regular files, extract the first # heading.
+        // Default: file stem → title case.
+        let is_readme = path.file_name()
+            .map(|n| n.to_string_lossy().to_lowercase() == "readme.md")
+            .unwrap_or(false);
+        let display = if is_readme {
+            // Try dir name cleaning; fall back to heading extraction
+            path.parent()
+                .and_then(|p| p.file_name())
+                .map(|n| dir_display_name(&n.to_string_lossy()))
+                .unwrap_or_else(|| display_name_for(&raw_content, path))
+        } else {
+            display_name_for(&raw_content, path)
+        };
 
-        if i > 0 {
+        // Try: detect nav-only README; default: false (treat as content)
+        let nav = is_nav_only(&raw_content);
+
+        toc.push(TocEntry {
+            anchor: anchor.clone(),
+            display: display.clone(),
+            depth: *depth,
+            is_nav: nav,
+        });
+
+        // Prepare content for this section
+        let processed = if nav {
+            // Nav-only README: extract intro prose only; default: empty string
+            extract_intro(&raw_content)
+        } else {
+            // Try: strip inline TOC blocks; default: use raw content
+            let stripped = strip_inline_toc(&raw_content);
+            // Try: rewrite .md links to #anchors; default: use stripped content
+            let file_dir = path.parent().unwrap_or(path);
+            rewrite_md_links(&stripped, file_dir, &path_map)
+        };
+
+        // Skip entirely empty sections (nav READMEs with no intro prose)
+        if processed.trim().is_empty() {
+            continue;
+        }
+
+        // Page break before each section except the first
+        if !sections.is_empty() {
             sections.push_str("<div style=\"page-break-before:always\"></div>\n");
         }
         sections.push_str(&format!(
-            "<h1 id=\"{anchor}\" style=\"margin-top:0.5em\">{name}</h1>\n"
+            "<h1 id=\"{anchor}\" style=\"margin-top:0.5em\">{display}</h1>\n"
         ));
-        sections.push_str(&comrak::markdown_to_html(&content, &opts));
+        sections.push_str(&comrak::markdown_to_html(&processed, &opts));
     }
 
-    let mut toc_html = String::from("<nav class=\"toc\">\n<h2>Table of Contents</h2>\n<ol>\n");
-    for (anchor, name) in &toc_entries {
-        toc_html.push_str(&format!("  <li><a href=\"#{anchor}\">{name}</a></li>\n"));
+    // ── 4. build hierarchical TOC ──────────────────────────────────────────
+    let mut toc_html = String::from(
+        "<nav class=\"toc\">\n<h2>Table of Contents</h2>\n<ul class=\"toc-root\">\n",
+    );
+    let mut current_depth: Option<usize> = None;
+    let mut open_uls = 0u32;
+
+    for entry in &toc {
+        // Skip nav-only entries that produced no content
+        if entry.is_nav {
+            // Still include as a group heading if it has a nice name
+            // but don't make it a link — it has no rendered content worth jumping to
+        }
+
+        let target_depth = entry.depth;
+
+        match current_depth {
+            None => {
+                current_depth = Some(target_depth);
+            }
+            Some(cd) => {
+                if target_depth > cd {
+                    for _ in 0..(target_depth - cd) {
+                        toc_html.push_str("<ul>\n");
+                        open_uls += 1;
+                    }
+                } else if target_depth < cd {
+                    for _ in 0..(cd - target_depth) {
+                        toc_html.push_str("</ul>\n");
+                        if open_uls > 0 {
+                            open_uls -= 1;
+                        }
+                    }
+                }
+                current_depth = Some(target_depth);
+            }
+        }
+
+        if entry.is_nav {
+            toc_html.push_str(&format!(
+                "  <li><strong>{}</strong></li>\n",
+                entry.display
+            ));
+        } else {
+            toc_html.push_str(&format!(
+                "  <li><a href=\"#{}\">{}</a></li>\n",
+                entry.anchor, entry.display
+            ));
+        }
     }
-    toc_html.push_str("</ol>\n</nav>\n<div style=\"page-break-after:always\"></div>\n");
+
+    // Close any remaining nested <ul>s
+    for _ in 0..open_uls {
+        toc_html.push_str("</ul>\n");
+    }
+    toc_html.push_str("</ul>\n</nav>\n<div style=\"page-break-after:always\"></div>\n");
 
     let full_body = format!("{toc_html}{sections}");
     let html = html_page(&full_body, root_name);
 
-    // ── 3. write temp HTML ─────────────────────────────────────────────────
+    // ── 5. write temp HTML ─────────────────────────────────────────────────
     let tmp_html = std::env::temp_dir().join("mdreader_export.html");
     fs::write(&tmp_html, &html)
         .map_err(|e| format!("Failed to write temp HTML: {e}"))?;
 
-    // ── 4. Chrome / Edge headless → PDF ───────────────────────────────────
+    // ── 6. Chrome / Edge headless → PDF ───────────────────────────────────
     let chrome = find_chrome()
         .ok_or_else(|| "Chrome/Edge not found — cannot generate PDF.".to_string())?;
 

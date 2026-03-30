@@ -4,6 +4,34 @@ All notable changes to MDReader are documented here.
 
 ---
 
+## [0.2.3] — 2026-03-30
+
+### Changed
+
+- **Smart hierarchical TOC** — PDF export now generates a nested table of
+  contents that mirrors the directory structure instead of a flat list.
+  All transformations use a try/default pattern so non-compliant content
+  is never mangled:
+
+  - **Heading extraction**: display names are pulled from the first
+    `# heading` in each file; falls back to file stem → title case
+  - **Directory name cleaning**: `part-1-vision` → "Part 1 — Vision",
+    kebab-case → Title Case; falls back to raw name
+  - **Nav-only README detection**: READMEs that are mostly `.md` link
+    lists (>50% of content lines) are folded into the TOC as group
+    headings with only their intro prose rendered; falls back to treating
+    them as regular content
+  - **Inline TOC stripping**: "In this part:" / "Table of Contents"
+    sections followed by `.md` link lists are removed since the generated
+    TOC replaces them; falls back to keeping the block
+  - **Internal link rewriting**: `[text](relative/path.md)` links are
+    rewritten to `#doc-N` anchors so cross-references work within the
+    concatenated PDF; non-matching links are left untouched
+  - **Hierarchical nesting**: TOC entries are nested with `<ul>` based
+    on directory depth, producing a book-like structure
+
+---
+
 ## [0.2.2] — 2026-03-30
 
 ### Changed
