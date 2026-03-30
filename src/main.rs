@@ -402,9 +402,19 @@ fn dir_display_name(dir_name: &str) -> String {
     slug_to_title(dir_name)
 }
 
-/// Detect whether a markdown file is mostly a navigation page (lists of .md links).
-/// Returns true if >50% of non-blank, non-heading, non-hr lines are .md link lines.
-fn is_nav_only(content: &str) -> bool {
+/// Detect whether a markdown file is purely a navigation index (almost entirely
+/// `.md` link lists with minimal prose).  Very conservative: only returns true
+/// when the file is named README.md AND ≥70% of content lines are link-list
+/// entries.  Anything ambiguous is treated as real content.
+fn is_nav_only(content: &str, path: &Path) -> bool {
+    // Only READMEs can be nav-only; regular docs are never stripped.
+    let is_readme = path.file_name()
+        .map(|n| n.to_string_lossy().to_lowercase() == "readme.md")
+        .unwrap_or(false);
+    if !is_readme {
+        return false;
+    }
+
     let mut link_lines = 0u32;
     let mut content_lines = 0u32;
 
@@ -414,14 +424,17 @@ fn is_nav_only(content: &str) -> bool {
             continue;
         }
         content_lines += 1;
-        // Matches lines like `- [text](path.md)` or `## [text](path/README.md)`
-        if t.contains("](") && t.contains(".md)") {
+        // Only count lines that START with `- [` and end with `.md)` — strict
+        if (t.starts_with("- [") || t.starts_with("* ["))
+            && t.contains("](")
+            && t.ends_with(".md)")
+        {
             link_lines += 1;
         }
     }
 
-    // Need at least a few lines to judge; if very short, don't strip.
-    content_lines >= 3 && link_lines * 2 > content_lines
+    // Very conservative threshold: 70% link lines, minimum 3 content lines
+    content_lines >= 3 && link_lines * 10 > content_lines * 7
 }
 
 /// Extract introductory prose from a navigation README (everything before the
@@ -450,9 +463,11 @@ fn extract_intro(content: &str) -> String {
     intro.trim().to_string()
 }
 
-/// Strip inline TOC blocks from content: contiguous runs of list items
-/// that are links to .md files, plus any immediately preceding heading
-/// like "In this part:" or "Contents".
+/// Strip inline TOC blocks: only removes a heading + link-list block when
+/// the heading is EXACTLY "In this part:" (case-insensitive) or
+/// "Table of Contents" — and every subsequent non-blank line is a markdown
+/// list item linking to a `.md` file.  If the block doesn't match this
+/// strict pattern it is left untouched.
 fn strip_inline_toc(content: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let mut out = Vec::with_capacity(lines.len());
@@ -461,32 +476,50 @@ fn strip_inline_toc(content: &str) -> String {
     while i < lines.len() {
         let t = lines[i].trim();
 
-        // Detect a heading followed by a block of .md link lines
+        // Only match headings that are exactly TOC-like labels
         if t.starts_with('#') && i + 1 < lines.len() {
-            let lower = t.to_lowercase();
-            let is_toc_heading = lower.contains("in this part")
-                || lower.contains("table of contents")
-                || lower.contains("contents");
+            // Strip the #'s and ** bold markers to get the heading text
+            let heading_text = t.trim_start_matches('#').trim()
+                .trim_start_matches("**").trim_end_matches("**").trim()
+                .to_lowercase();
+
+            let is_toc_heading = heading_text == "in this part:"
+                || heading_text == "in this part"
+                || heading_text == "table of contents";
 
             if is_toc_heading {
-                // Skip this heading and any following blank + link lines
-                i += 1;
-                while i < lines.len() {
-                    let lt = lines[i].trim();
-                    if lt.is_empty()
-                        || (lt.starts_with("- ") && lt.contains("](") && lt.contains(".md)"))
+                // Peek ahead: only skip if ALL following non-blank lines are
+                // `.md` link-list items.  If any line isn't, abort and keep
+                // everything.
+                let mut j = i + 1;
+                let all_links = true;
+                let mut found_links = false;
+
+                while j < lines.len() {
+                    let lt = lines[j].trim();
+                    if lt.is_empty() {
+                        j += 1;
+                        continue;
+                    }
+                    if (lt.starts_with("- [") || lt.starts_with("* ["))
+                        && lt.contains("](")
+                        && lt.contains(".md)")
                     {
-                        i += 1;
+                        found_links = true;
+                        j += 1;
                     } else {
+                        // Non-link content line → stop scanning
                         break;
                     }
                 }
-                continue;
+
+                if found_links && all_links {
+                    // Skip the heading + link block
+                    i = j;
+                    continue;
+                }
             }
         }
-
-        // Standalone link-list blocks (e.g. root README's `## [Part I](...)`)
-        // We keep these — they may contain useful descriptive text around them.
 
         out.push(lines[i]);
         i += 1;
@@ -508,67 +541,102 @@ fn build_path_map(entries: &[(PathBuf, usize)]) -> std::collections::HashMap<Pat
 /// Rewrite relative `.md` links in markdown content to `#anchor` references.
 /// Only rewrites links whose resolved path exists in the path map.
 /// Non-matching links are left untouched.
+/// Skips code blocks (``` fenced) and inline code (` backtick) entirely.
 fn rewrite_md_links(
     content: &str,
     file_dir: &Path,
     path_map: &std::collections::HashMap<PathBuf, String>,
 ) -> String {
-    let mut result = String::with_capacity(content.len());
-    let mut rest = content;
+    let mut out_lines = Vec::new();
+    let mut in_code_block = false;
 
-    while let Some(start) = rest.find("](") {
-        // Copy everything up to and including the `]`
-        result.push_str(&rest[..=start]);
-        rest = &rest[start + 2..]; // skip `](`
+    for line in content.lines() {
+        // Track fenced code blocks — never touch content inside them
+        if line.trim().starts_with("```") {
+            in_code_block = !in_code_block;
+            out_lines.push(line.to_string());
+            continue;
+        }
+        if in_code_block {
+            out_lines.push(line.to_string());
+            continue;
+        }
 
-        // Find the closing `)`
-        if let Some(end) = rest.find(')') {
-            let link_target = &rest[..end];
+        // Process this line: find markdown links `[text](target.md)`
+        // Skip anything inside inline backticks
+        let mut result = String::with_capacity(line.len());
+        let mut chars = line.char_indices().peekable();
+        let bytes = line.as_bytes();
 
-            // Only rewrite if it's a .md link (not http, not anchors, etc.)
-            if link_target.ends_with(".md")
-                || link_target.contains(".md#")
-                || link_target.ends_with("README.md")
-            {
-                // Strip any #fragment from the path for lookup
-                let path_part = link_target.split('#').next().unwrap_or(link_target);
+        while let Some((pos, ch)) = chars.next() {
+            // Skip inline code spans
+            if ch == '`' {
+                result.push(ch);
+                for (_, c) in chars.by_ref() {
+                    result.push(c);
+                    if c == '`' { break; }
+                }
+                continue;
+            }
 
-                // Try to resolve relative to the file's directory
-                let resolved = file_dir.join(path_part);
-                let canonical = resolved.canonicalize().ok();
+            // Look for `](` pattern — the `]` must be preceded by a `[` somewhere
+            if ch == ']' && pos + 1 < line.len() && bytes[pos + 1] == b'(' {
+                // Find the opening `[` by scanning backwards in result
+                if !result.contains('[') {
+                    result.push(ch);
+                    continue;
+                }
 
-                let mut rewritten = false;
-                if let Some(ref canon) = canonical {
-                    if let Some(anchor) = path_map.get(canon) {
-                        result.push_str("(#");
+                // Consume the `(`
+                chars.next(); // skip `(`
+
+                // Collect the link target up to `)`
+                let mut target = String::new();
+                let mut found_close = false;
+                for (_, c) in chars.by_ref() {
+                    if c == ')' { found_close = true; break; }
+                    // Bail on spaces/newlines — not a valid markdown link
+                    if c == ' ' || c == '\n' { target.push(c); break; }
+                    target.push(c);
+                }
+
+                if !found_close {
+                    // Not a valid link — dump what we collected
+                    result.push(']');
+                    result.push('(');
+                    result.push_str(&target);
+                    continue;
+                }
+
+                // Only rewrite .md links
+                if target.ends_with(".md") || target.contains(".md#") {
+                    let path_part = target.split('#').next().unwrap_or(&target);
+                    let resolved = file_dir.join(path_part);
+
+                    if let Some(anchor) = resolved.canonicalize().ok()
+                        .and_then(|c| path_map.get(&c))
+                    {
+                        result.push_str("](#");
                         result.push_str(anchor);
                         result.push(')');
-                        rest = &rest[end + 1..];
-                        rewritten = true;
+                        continue;
                     }
                 }
-                if !rewritten {
-                    // Default: leave original link intact
-                    result.push('(');
-                    result.push_str(link_target);
-                    result.push(')');
-                    rest = &rest[end + 1..];
-                }
-            } else {
-                // Not a .md link — pass through
+
+                // Default: leave link untouched
+                result.push(']');
                 result.push('(');
-                result.push_str(link_target);
+                result.push_str(&target);
                 result.push(')');
-                rest = &rest[end + 1..];
+            } else {
+                result.push(ch);
             }
-        } else {
-            // No closing `)` — broken link syntax, pass through
-            result.push('(');
-            break;
         }
+
+        out_lines.push(result);
     }
-    result.push_str(rest);
-    result
+
+    out_lines.join("\n")
 }
 
 // ─── pdf export ──────────────────────────────────────────────────────────────
@@ -634,7 +702,7 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
         };
 
         // Try: detect nav-only README; default: false (treat as content)
-        let nav = is_nav_only(&raw_content);
+        let nav = is_nav_only(&raw_content, path);
 
         toc.push(TocEntry {
             anchor: anchor.clone(),
@@ -643,22 +711,48 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
             is_nav: nav,
         });
 
-        // Prepare content for this section
+        // Prepare content for this section.
+        // Safety net: if any transformation loses >40% of the content length,
+        // fall back to the raw markdown — better to have duplicate TOC entries
+        // than mangled content.
         let processed = if nav {
-            // Nav-only README: extract intro prose only; default: empty string
-            extract_intro(&raw_content)
+            let intro = extract_intro(&raw_content);
+            // Nav-only with no intro → will be skipped below
+            intro
         } else {
-            // Try: strip inline TOC blocks; default: use raw content
             let stripped = strip_inline_toc(&raw_content);
-            // Try: rewrite .md links to #anchors; default: use stripped content
             let file_dir = path.parent().unwrap_or(path);
-            rewrite_md_links(&stripped, file_dir, &path_map)
+            let rewritten = rewrite_md_links(&stripped, file_dir, &path_map);
+
+            // Safety net: if we lost too much content, use raw
+            if rewritten.len() < raw_content.len() * 60 / 100 {
+                raw_content.clone()
+            } else {
+                rewritten
+            }
         };
 
         // Skip entirely empty sections (nav READMEs with no intro prose)
         if processed.trim().is_empty() {
             continue;
         }
+
+        // Strip the first `# heading` line from the content to avoid a
+        // duplicate title (we already inject our own <h1>).
+        let final_content = {
+            let mut lines = processed.lines();
+            let mut skipped = false;
+            let mut out = String::new();
+            for line in &mut lines {
+                if !skipped && line.trim().starts_with("# ") && !line.trim().starts_with("##") {
+                    skipped = true;
+                    continue;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            if skipped { out } else { processed }
+        };
 
         // Page break before each section except the first
         if !sections.is_empty() {
@@ -667,7 +761,7 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
         sections.push_str(&format!(
             "<h1 id=\"{anchor}\" style=\"margin-top:0.5em\">{display}</h1>\n"
         ));
-        sections.push_str(&comrak::markdown_to_html(&processed, &opts));
+        sections.push_str(&comrak::markdown_to_html(&final_content, &opts));
     }
 
     // ── 4. build hierarchical TOC ──────────────────────────────────────────
