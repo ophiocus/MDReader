@@ -22,7 +22,7 @@ enum UpdateState {
     Checking,
     Idle,
     Available(UpdateAvailable),
-    Downloading,
+    Downloading(mpsc::Receiver<Result<PathBuf, String>>),
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
@@ -53,21 +53,31 @@ fn check_latest_release() -> Option<UpdateAvailable> {
     Some(UpdateAvailable { version: tag, url })
 }
 
-fn download_and_install(url: &str, version: &str) {
+fn download_and_install(url: &str, version: &str) -> Result<PathBuf, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("MDReader/", env!("CARGO_PKG_VERSION")))
-        .build();
-    if let Ok(client) = client {
-        if let Ok(bytes) = client.get(url).send().and_then(|r| r.bytes()) {
-            let path = std::env::temp_dir().join(format!("MDReader-{version}.msi"));
-            if std::fs::write(&path, &bytes).is_ok() {
-                let _ = std::process::Command::new("msiexec")
-                    .args(["/i", path.to_str().unwrap_or(""), "/passive", "/norestart"])
-                    .spawn();
-                std::process::exit(0);
-            }
-        }
-    }
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let bytes = client
+        .get(url)
+        .send()
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .map_err(|e| format!("Download failed: {e}"))?;
+
+    let path = std::env::temp_dir().join(format!("MDReader-{version}.msi"));
+    std::fs::write(&path, &bytes)
+        .map_err(|e| format!("Failed to write MSI: {e}"))?;
+
+    // Launch installer and exit so it can replace the running binary.
+    std::process::Command::new("msiexec")
+        .args(["/i", path.to_str().unwrap_or(""), "/passive", "/norestart"])
+        .spawn()
+        .map_err(|e| format!("Failed to launch installer: {e}"))?;
+
+    Ok(path)
 }
 
 // ─── file tree ────────────────────────────────────────────────────────────────
@@ -320,61 +330,9 @@ fn find_chrome() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
-/// Export the current markdown file to PDF.
-/// Returns `Ok(path)` on success or `Err(message)` on failure.
-fn export_pdf(content: &str, source_path: &Path) -> Result<PathBuf, String> {
-    // ── 1. pick save location ──────────────────────────────────────────────
-    let stem = source_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let default_name = format!("{stem}.pdf");
-
-    let pdf_path = rfd::FileDialog::new()
-        .add_filter("PDF", &["pdf"])
-        .set_file_name(&default_name)
-        .save_file()
-        .ok_or_else(|| "Export cancelled.".to_string())?;
-
-    // ── 2. markdown → HTML ─────────────────────────────────────────────────
-    let opts = comrak::Options::default();
-    let body = comrak::markdown_to_html(content, &opts);
-    let title = stem.as_ref();
-    let html = html_page(&body, title);
-
-    // ── 3. write temp HTML ─────────────────────────────────────────────────
-    let tmp_html = std::env::temp_dir().join("mdreader_export.html");
-    fs::write(&tmp_html, &html)
-        .map_err(|e| format!("Failed to write temp HTML: {e}"))?;
-
-    // ── 4. Chrome / Edge headless → PDF ───────────────────────────────────
-    let chrome = find_chrome()
-        .ok_or_else(|| "Chrome/Edge not found — saved as HTML instead.".to_string())?;
-
-    let out = Command::new(&chrome)
-        .args([
-            "--headless=new",
-            "--disable-gpu",
-            "--no-sandbox",
-            "--disable-software-rasterizer",
-            &format!("--print-to-pdf={}", pdf_path.display()),
-            &format!("file:///{}", tmp_html.display().to_string().replace('\\', "/")),
-        ])
-        .output()
-        .map_err(|e| format!("Failed to launch browser: {e}"))?;
-
-    let _ = fs::remove_file(&tmp_html);
-
-    if out.status.success() || pdf_path.exists() {
-        Ok(pdf_path)
-    } else {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(format!("Browser error: {stderr}"))
-    }
-}
-
 /// Export all markdown files in the tree as a single PDF with a table of contents.
-fn export_all_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
+/// Returns `Ok(path)` on success or `Err(message)` on failure.
+fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
     let paths = collect_md_paths(tree);
     if paths.is_empty() {
         return Err("No markdown files to export.".to_string());
@@ -390,7 +348,7 @@ fn export_all_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String>
 
     // ── 2. build TOC + concatenated HTML ───────────────────────────────────
     let opts = comrak::Options::default();
-    let mut toc_entries: Vec<(String, String)> = Vec::new(); // (anchor, display_name)
+    let mut toc_entries: Vec<(String, String)> = Vec::new();
     let mut sections = String::new();
 
     for (i, path) in paths.iter().enumerate() {
@@ -401,7 +359,6 @@ fn export_all_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String>
 
         toc_entries.push((anchor.clone(), name.clone()));
 
-        // Section divider (page break before each file except the first)
         if i > 0 {
             sections.push_str("<div style=\"page-break-before:always\"></div>\n");
         }
@@ -411,7 +368,6 @@ fn export_all_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String>
         sections.push_str(&comrak::markdown_to_html(&content, &opts));
     }
 
-    // Build TOC HTML
     let mut toc_html = String::from("<nav class=\"toc\">\n<h2>Table of Contents</h2>\n<ol>\n");
     for (anchor, name) in &toc_entries {
         toc_html.push_str(&format!("  <li><a href=\"#{anchor}\">{name}</a></li>\n"));
@@ -422,7 +378,7 @@ fn export_all_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String>
     let html = html_page(&full_body, root_name);
 
     // ── 3. write temp HTML ─────────────────────────────────────────────────
-    let tmp_html = std::env::temp_dir().join("mdreader_export_all.html");
+    let tmp_html = std::env::temp_dir().join("mdreader_export.html");
     fs::write(&tmp_html, &html)
         .map_err(|e| format!("Failed to write temp HTML: {e}"))?;
 
@@ -617,34 +573,14 @@ impl eframe::App for MDReaderApp {
 
                     ui.separator();
 
-                    // Export to PDF — only enabled when a file is open.
-                    let can_export = self.selected_file.is_some() && !self.file_content.is_empty();
+                    // Export all files to a single PDF with TOC.
+                    let can_export = !self.tree.is_empty();
                     if ui
                         .add_enabled(can_export, egui::Button::new("⬇  Export as PDF…"))
                         .clicked()
                     {
-                        if let Some(ref path) = self.selected_file.clone() {
-                            match export_pdf(&self.file_content, path) {
-                                Ok(out) => {
-                                    self.status_msg =
-                                        Some(format!("✔ PDF saved → {}", out.display()));
-                                }
-                                Err(e) => {
-                                    self.status_msg = Some(format!("✘ {e}"));
-                                }
-                            }
-                        }
-                        ui.close_menu();
-                    }
-
-                    // Export all files as single PDF with TOC.
-                    let has_files = !self.tree.is_empty();
-                    if ui
-                        .add_enabled(has_files, egui::Button::new("⬇  Export All as PDF…"))
-                        .clicked()
-                    {
                         let root_name = self.root_display_name();
-                        match export_all_pdf(&self.tree, &root_name) {
+                        match export_pdf(&self.tree, &root_name) {
                             Ok(out) => {
                                 self.status_msg =
                                     Some(format!("✔ PDF saved → {}", out.display()));
@@ -732,13 +668,30 @@ impl eframe::App for MDReaderApp {
                         if ui.add(egui::Label::new(label).sense(egui::Sense::click())).clicked() {
                             let url = avail.url.clone();
                             let version = avail.version.clone();
-                            std::thread::spawn(move || download_and_install(&url, &version));
-                            self.update_state = UpdateState::Downloading;
+                            let (tx, rx) = mpsc::channel();
+                            std::thread::spawn(move || {
+                                let result = download_and_install(&url, &version);
+                                let _ = tx.send(result);
+                            });
+                            self.update_state = UpdateState::Downloading(rx);
                         }
                         ui.separator();
                     }
-                    UpdateState::Downloading => {
-                        ui.label(RichText::new("⬇ downloading update…").weak().size(11.0));
+                    UpdateState::Downloading(rx) => {
+                        if let Ok(result) = rx.try_recv() {
+                            match result {
+                                Ok(_) => {
+                                    // Installer launched — exit so it can replace the binary.
+                                    std::process::exit(0);
+                                }
+                                Err(e) => {
+                                    self.status_msg = Some(format!("✘ Update failed: {e}"));
+                                    self.update_state = UpdateState::Idle;
+                                }
+                            }
+                        } else {
+                            ui.label(RichText::new("⬇ downloading update…").weak().size(11.0));
+                        }
                         ui.separator();
                     }
                     UpdateState::Idle => {}

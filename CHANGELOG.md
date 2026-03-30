@@ -6,15 +6,24 @@ All notable changes to MDReader are documented here.
 
 ## [0.2.2] — 2026-03-30
 
-### Added
+### Changed
 
-- **Export All as PDF** — new File › "Export All as PDF…" menu item that
-  concatenates every markdown file in the sidebar tree into a single PDF
-  with a clickable **Table of Contents** on the first page. Each file
-  starts on a new page with its filename as an `<h1>` heading. The TOC
-  links jump to the corresponding section in the PDF.
-- `collect_md_paths()` helper that walks the `FileNode` tree depth-first
-  and returns all `.md` file paths in sidebar order
+- **Export as PDF** now concatenates every markdown file in the sidebar
+  tree into a single PDF with a clickable **Table of Contents** on the
+  first page. Each file starts on a new page with its filename as an
+  `<h1>` heading. Previously only the single selected file was exported.
+
+### Fixed
+
+- **Auto-updater silent failure** — `download_and_install` previously
+  ran in a fire-and-forget thread with no error feedback; if the download
+  or `msiexec` launch failed, the app stayed stuck on "downloading" or
+  the click did nothing visible. Now the thread reports success/failure
+  via a channel, the app only calls `process::exit(0)` after the
+  installer has actually launched, and errors are surfaced in the status
+  bar (e.g. "✘ Update failed: Download failed: …").
+- **GitHub Actions Node.js 20 deprecation** — bumped `actions/checkout`,
+  `upload-artifact`, and `download-artifact` from v4 → v5
 
 ---
 
