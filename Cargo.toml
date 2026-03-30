@@ -1,6 +1,6 @@
 [package]
 name = "mdreader"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 authors = ["ophiocus <csantanad@gmail.com>"]
 description = "Read-only Windows markdown viewer built with Rust and egui"

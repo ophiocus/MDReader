@@ -4,6 +4,43 @@ All notable changes to MDReader are documented here.
 
 ---
 
+## [0.2.5] — 2026-03-30
+
+### Added
+
+- **Drag-to-reorder sidebar items** — each node in the sidebar now has a
+  drag handle (⠿). Drag any sibling to reorder it within its parent
+  directory. The order is persisted to `%APPDATA%\MDReader\ordering.json`
+  and applied on every tree build, including PDF export. This fixes the
+  alphabetical ordering issue where "appendices" appeared before "part-1".
+
+### Changed
+
+- **Folder names visually prominent** — directory entries in the sidebar
+  are now rendered with a larger font (13px), gold coloring, and the
+  `dir_display_name` formatter (`part-1-vision` → "Part 1 — Vision").
+  File entries remain compact.
+
+---
+
+## [0.2.4] — 2026-03-30
+
+### Added
+
+- **Desktop shortcut** — MSI installer now creates an "MD Reader"
+  shortcut on the desktop with the app icon.
+
+### Fixed
+
+- **PDF export mangling content** — conservative TOC transforms with
+  safety net. Nav detection only on READMEs, strict inline TOC strip,
+  code-block-aware link rewriting, 40% content-loss fallback to raw.
+
+- **Updater silent failure** — `msiexec` now launched elevated via
+  `Start-Process -Verb RunAs` to trigger UAC for per-machine installs.
+
+---
+
 ## [0.2.3] — 2026-03-30
 
 ### Changed

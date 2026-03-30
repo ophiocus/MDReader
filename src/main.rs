@@ -5,6 +5,7 @@ use egui::{Color32, RichText, ScrollArea};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -104,25 +105,29 @@ enum NodeKind {
 }
 
 impl FileNode {
-    fn from_path(path: &Path) -> Option<Self> {
+    fn from_path(path: &Path, order: &OrderConfig) -> Option<Self> {
         let name = path.file_name()?.to_string_lossy().to_string();
 
         if path.is_dir() {
             let mut children: Vec<FileNode> = fs::read_dir(path)
                 .ok()?
                 .filter_map(|e| e.ok())
-                .filter_map(|e| FileNode::from_path(&e.path()))
+                .filter_map(|e| FileNode::from_path(&e.path(), order))
                 .collect();
 
             if children.is_empty() {
                 return None;
             }
 
+            // Default: dirs first, then alphabetical
             children.sort_by(|a, b| match (a.is_dir(), b.is_dir()) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
             });
+
+            // Apply custom ordering (overrides alphabetical if present)
+            order.apply(path, &mut children);
 
             Some(FileNode { name, path: path.to_path_buf(), kind: NodeKind::Dir(children) })
         } else if name.to_lowercase().ends_with(".md") {
@@ -150,7 +155,7 @@ fn collect_md_entries(nodes: &[FileNode], depth: usize) -> Vec<(PathBuf, usize)>
     out
 }
 
-fn build_tree(root: &str) -> Vec<FileNode> {
+fn build_tree(root: &str, order: &OrderConfig) -> Vec<FileNode> {
     let path = Path::new(root);
     if !path.is_dir() {
         return vec![];
@@ -159,58 +164,231 @@ fn build_tree(root: &str) -> Vec<FileNode> {
     let mut nodes: Vec<FileNode> = fs::read_dir(path)
         .map(|rd| {
             rd.filter_map(|e| e.ok())
-                .filter_map(|e| FileNode::from_path(&e.path()))
+                .filter_map(|e| FileNode::from_path(&e.path(), order))
                 .collect()
         })
         .unwrap_or_default();
 
+    // Default alphabetical
     nodes.sort_by(|a, b| match (a.is_dir(), b.is_dir()) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
         _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
+    // Apply custom ordering
+    order.apply(path, &mut nodes);
+
     nodes
 }
 
-/// Renders one tree node; returns the path of any file clicked.
-fn render_node(
+/// Sidebar action returned from rendering.
+enum SidebarAction {
+    LoadFile(PathBuf),
+    Reorder { parent: PathBuf, from: usize, to: usize },
+}
+
+/// Renders a list of sibling nodes with drag-reorder support.
+/// Returns any action triggered (file click or reorder).
+fn render_siblings(
     ui: &mut egui::Ui,
-    node: &mut FileNode,
+    nodes: &mut [FileNode],
     selected: &Option<PathBuf>,
-) -> Option<PathBuf> {
-    match &mut node.kind {
-        NodeKind::Dir(children) => {
-            let resp = egui::CollapsingHeader::new(
-                RichText::new(format!("📁 {}", node.name)).strong(),
-            )
-            .show(ui, |ui| {
-                let mut clicked = None;
-                for child in children.iter_mut() {
-                    if let Some(p) = render_node(ui, child, selected) {
-                        clicked = Some(p);
+    parent_path: &Path,
+    drag_source: &mut Option<(PathBuf, usize)>, // (parent, index)
+) -> Option<SidebarAction> {
+    let mut action: Option<SidebarAction> = None;
+    let node_count = nodes.len();
+
+    for idx in 0..node_count {
+        let node = &mut nodes[idx];
+        let is_being_dragged = drag_source
+            .as_ref()
+            .map(|(p, i)| p == parent_path && *i == idx)
+            .unwrap_or(false);
+
+        // ── drag handle + node label ──
+        let id = ui.make_persistent_id((&node.path, "drag"));
+
+        match &mut node.kind {
+            NodeKind::Dir(children) => {
+                // --- Folder: prominent visual style ---
+                ui.add_space(4.0);
+
+                // Drag handle + folder heading in a horizontal row
+                let dir_path = node.path.clone();
+                let header_text = dir_display_name(&node.name);
+
+                let resp = ui.horizontal(|ui| {
+                    // Drag handle
+                    let handle = ui.add(
+                        egui::Label::new(
+                            RichText::new("⠿")
+                                .size(14.0)
+                                .color(if is_being_dragged {
+                                    Color32::from_rgb(80, 170, 255)
+                                } else {
+                                    Color32::from_rgb(120, 120, 130)
+                                }),
+                        )
+                        .sense(egui::Sense::drag()),
+                    );
+
+                    if handle.drag_started() {
+                        *drag_source = Some((parent_path.to_path_buf(), idx));
+                    }
+
+                    // Drop target: if dragging a sibling, detect hover
+                    if let Some((ref dp, src_idx)) = *drag_source {
+                        if dp == parent_path && src_idx != idx && handle.hovered() {
+                            // Show drop indicator
+                            ui.painter().rect_stroke(
+                                handle.rect.expand(2.0),
+                                2.0,
+                                egui::Stroke::new(2.0, Color32::from_rgb(80, 170, 255)),
+                            );
+
+                            if ui.input(|i| i.pointer.any_released()) {
+                                action = Some(SidebarAction::Reorder {
+                                    parent: parent_path.to_path_buf(),
+                                    from: src_idx,
+                                    to: idx,
+                                });
+                                *drag_source = None;
+                            }
+                        }
+                    }
+
+                    // Folder name — prominent
+                    ui.label(
+                        RichText::new(format!("📁 {header_text}"))
+                            .size(13.0)
+                            .strong()
+                            .color(Color32::from_rgb(200, 180, 120)),
+                    );
+                });
+
+                // Check the drop on the whole horizontal row too
+                if let Some((ref dp, src_idx)) = *drag_source {
+                    if dp == parent_path && src_idx != idx && resp.response.hovered() {
+                        ui.painter().rect_stroke(
+                            resp.response.rect.expand(1.0),
+                            2.0,
+                            egui::Stroke::new(1.5, Color32::from_rgb(80, 170, 255)),
+                        );
+                        if ui.input(|i| i.pointer.any_released()) {
+                            action = Some(SidebarAction::Reorder {
+                                parent: parent_path.to_path_buf(),
+                                from: src_idx,
+                                to: idx,
+                            });
+                            *drag_source = None;
+                        }
                     }
                 }
-                clicked
-            });
-            resp.body_returned.flatten()
-        }
 
-        NodeKind::File => {
-            let is_selected = selected.as_ref() == Some(&node.path);
-            let label = if is_selected {
-                RichText::new(format!("  📄 {}", node.name))
-                    .color(Color32::from_rgb(80, 170, 255))
-            } else {
-                RichText::new(format!("  📄 {}", node.name))
-            };
-            if ui.selectable_label(is_selected, label).clicked() {
-                Some(node.path.clone())
-            } else {
-                None
+                // Collapsible children
+                let child_resp = egui::CollapsingHeader::new(
+                    RichText::new("").size(0.0), // invisible — heading is above
+                )
+                .id_source(id)
+                .default_open(true)
+                .show(ui, |ui| {
+                    render_siblings(ui, children, selected, &dir_path, drag_source)
+                });
+
+                if let Some(Some(child_action)) = child_resp.body_returned {
+                    if action.is_none() {
+                        action = Some(child_action);
+                    }
+                }
+
+                ui.add_space(2.0);
+            }
+
+            NodeKind::File => {
+                let is_selected = selected.as_ref() == Some(&node.path);
+                let node_path = node.path.clone();
+
+                let resp = ui.horizontal(|ui| {
+                    // Drag handle
+                    let handle = ui.add(
+                        egui::Label::new(
+                            RichText::new("⠿")
+                                .size(11.0)
+                                .color(if is_being_dragged {
+                                    Color32::from_rgb(80, 170, 255)
+                                } else {
+                                    Color32::from_rgb(90, 90, 100)
+                                }),
+                        )
+                        .sense(egui::Sense::drag()),
+                    );
+
+                    if handle.drag_started() {
+                        *drag_source = Some((parent_path.to_path_buf(), idx));
+                    }
+
+                    // Drop target
+                    if let Some((ref dp, src_idx)) = *drag_source {
+                        if dp == parent_path && src_idx != idx && handle.hovered() {
+                            ui.painter().rect_stroke(
+                                handle.rect.expand(2.0),
+                                2.0,
+                                egui::Stroke::new(2.0, Color32::from_rgb(80, 170, 255)),
+                            );
+                            if ui.input(|i| i.pointer.any_released()) {
+                                action = Some(SidebarAction::Reorder {
+                                    parent: parent_path.to_path_buf(),
+                                    from: src_idx,
+                                    to: idx,
+                                });
+                                *drag_source = None;
+                            }
+                        }
+                    }
+
+                    // File label
+                    let label = if is_selected {
+                        RichText::new(format!("📄 {}", node.name))
+                            .color(Color32::from_rgb(80, 170, 255))
+                    } else {
+                        RichText::new(format!("📄 {}", node.name))
+                    };
+
+                    if ui.selectable_label(is_selected, label).clicked() {
+                        action = Some(SidebarAction::LoadFile(node_path));
+                    }
+                });
+
+                // Drop target on whole row
+                if let Some((ref dp, src_idx)) = *drag_source {
+                    if dp == parent_path && src_idx != idx && resp.response.hovered() {
+                        ui.painter().rect_stroke(
+                            resp.response.rect.expand(1.0),
+                            2.0,
+                            egui::Stroke::new(1.5, Color32::from_rgb(80, 170, 255)),
+                        );
+                        if ui.input(|i| i.pointer.any_released()) {
+                            action = Some(SidebarAction::Reorder {
+                                parent: parent_path.to_path_buf(),
+                                from: src_idx,
+                                to: idx,
+                            });
+                            *drag_source = None;
+                        }
+                    }
+                }
             }
         }
     }
+
+    // Clear drag on release anywhere
+    if ui.input(|i| i.pointer.any_released()) {
+        *drag_source = None;
+    }
+
+    action
 }
 
 // ─── config ───────────────────────────────────────────────────────────────────
@@ -259,6 +437,71 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("MDReader")
             .join("config.json")
+    }
+}
+
+// ─── ordering config ─────────────────────────────────────────────────────────
+
+/// Persisted custom ordering for siblings within each directory.
+/// Maps a canonical directory path (as a string) to an ordered list of
+/// child file/folder names.  Directories not present use alphabetical order.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct OrderConfig {
+    #[serde(default)]
+    orders: HashMap<String, Vec<String>>,
+}
+
+impl OrderConfig {
+    fn load() -> Self {
+        if let Ok(s) = fs::read_to_string(Self::path()) {
+            serde_json::from_str(&s).unwrap_or_default()
+        } else {
+            Self::default()
+        }
+    }
+
+    fn save(&self) {
+        let p = Self::path();
+        if let Some(dir) = p.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        if let Ok(s) = serde_json::to_string_pretty(self) {
+            let _ = fs::write(p, s);
+        }
+    }
+
+    fn path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("MDReader")
+            .join("ordering.json")
+    }
+
+    /// Apply custom ordering to a list of children for a given parent dir.
+    /// Children not in the saved order are appended at the end in their
+    /// original (alphabetical) position.
+    fn apply(&self, parent: &Path, children: &mut Vec<FileNode>) {
+        let key = parent.to_string_lossy().to_string();
+        if let Some(order) = self.orders.get(&key) {
+            let name_to_pos: HashMap<&str, usize> = order
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.as_str(), i))
+                .collect();
+            children.sort_by(|a, b| {
+                let pa = name_to_pos.get(a.name.as_str()).copied().unwrap_or(usize::MAX);
+                let pb = name_to_pos.get(b.name.as_str()).copied().unwrap_or(usize::MAX);
+                pa.cmp(&pb)
+            });
+        }
+    }
+
+    /// Save the current child order for a parent directory.
+    fn set_order(&mut self, parent: &Path, children: &[FileNode]) {
+        let key = parent.to_string_lossy().to_string();
+        let names: Vec<String> = children.iter().map(|n| n.name.clone()).collect();
+        self.orders.insert(key, names);
+        self.save();
     }
 }
 
@@ -859,6 +1102,7 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
 
 struct MDReaderApp {
     config: Config,
+    order: OrderConfig,
     tree: Vec<FileNode>,
     selected_file: Option<PathBuf>,
     file_content: String,
@@ -875,6 +1119,8 @@ struct MDReaderApp {
     update_rx: mpsc::Receiver<Option<UpdateAvailable>>,
     /// Current state of the update workflow.
     update_state: UpdateState,
+    /// Drag-reorder state: (parent path, source index within siblings).
+    drag_reorder: Option<(PathBuf, usize)>,
 }
 
 impl MDReaderApp {
@@ -890,7 +1136,8 @@ impl MDReaderApp {
         apply_theme(&cc.egui_ctx, config.dark_mode);
         cc.egui_ctx.set_pixels_per_point(native_ppp * config.zoom);
 
-        let tree = build_tree(&config.root_path);
+        let order = OrderConfig::load();
+        let tree = build_tree(&config.root_path, &order);
         let root_input = config.root_path.clone();
 
         let (tx, rx) = mpsc::channel();
@@ -898,6 +1145,7 @@ impl MDReaderApp {
 
         Self {
             config,
+            order,
             tree,
             selected_file: None,
             file_content: String::new(),
@@ -909,6 +1157,7 @@ impl MDReaderApp {
             status_msg: None,
             update_rx: rx,
             update_state: UpdateState::Checking,
+            drag_reorder: None,
         }
     }
 
@@ -926,7 +1175,48 @@ impl MDReaderApp {
     }
 
     fn refresh_tree(&mut self) {
-        self.tree = build_tree(&self.config.root_path);
+        self.order = OrderConfig::load();
+        self.tree = build_tree(&self.config.root_path, &self.order);
+    }
+
+    /// Reorder siblings: move item at `from` to `to` within the children
+    /// of `parent`, then persist the new order.
+    fn reorder(&mut self, parent: &Path, from: usize, to: usize) {
+        // Find the sibling list to reorder — either the root tree or a dir's children
+        let root_path = PathBuf::from(&self.config.root_path);
+        let siblings = if parent == root_path {
+            Some(&mut self.tree)
+        } else {
+            Self::find_children(&mut self.tree, parent)
+        };
+
+        if let Some(nodes) = siblings {
+            if from < nodes.len() && to < nodes.len() && from != to {
+                let node = nodes.remove(from);
+                nodes.insert(to, node);
+                self.order.set_order(parent, nodes);
+            }
+        }
+    }
+
+    /// Recursively find the mutable children Vec for a given directory path.
+    fn find_children<'a>(
+        nodes: &'a mut Vec<FileNode>,
+        target: &Path,
+    ) -> Option<&'a mut Vec<FileNode>> {
+        for node in nodes.iter_mut() {
+            if node.path == target {
+                if let NodeKind::Dir(ref mut children) = node.kind {
+                    return Some(children);
+                }
+            }
+            if let NodeKind::Dir(ref mut children) = node.kind {
+                if let Some(found) = Self::find_children(children, target) {
+                    return Some(found);
+                }
+            }
+        }
+        None
     }
 
     /// Root folder display name for the sidebar title.
@@ -1201,8 +1491,9 @@ impl eframe::App for MDReaderApp {
         });
 
         // ── left sidebar — TOC ───────────────────────────────────────────────
-        let mut file_to_load: Option<PathBuf> = None;
+        let mut sidebar_action: Option<SidebarAction> = None;
         let sel = self.selected_file.clone();
+        let root_path = PathBuf::from(&self.config.root_path);
 
         egui::SidePanel::left("sidebar")
             .min_width(200.0)
@@ -1214,7 +1505,7 @@ impl eframe::App for MDReaderApp {
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new(self.root_display_name())
-                            .size(14.0)
+                            .size(15.0)
                             .strong(),
                     );
                 });
@@ -1234,17 +1525,24 @@ impl eframe::App for MDReaderApp {
                                 .size(12.0),
                             );
                         } else {
-                            for node in &mut self.tree {
-                                if let Some(p) = render_node(ui, node, &sel) {
-                                    file_to_load = Some(p);
-                                }
-                            }
+                            sidebar_action = render_siblings(
+                                ui,
+                                &mut self.tree,
+                                &sel,
+                                &root_path,
+                                &mut self.drag_reorder,
+                            );
                         }
                     });
             });
 
-        if let Some(p) = file_to_load {
-            self.load_file(p);
+        // Handle sidebar actions
+        match sidebar_action {
+            Some(SidebarAction::LoadFile(p)) => self.load_file(p),
+            Some(SidebarAction::Reorder { parent, from, to }) => {
+                self.reorder(&parent, from, to);
+            }
+            None => {}
         }
 
         // ── main content ─────────────────────────────────────────────────────
