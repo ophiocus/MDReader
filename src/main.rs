@@ -819,7 +819,11 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
     let path_map = build_path_map(&canon_entries);
 
     // ── 3. process each file ───────────────────────────────────────────────
-    let opts = comrak::Options::default();
+    let mut opts = comrak::Options::default();
+    opts.extension.table = true;
+    opts.extension.strikethrough = true;
+    opts.extension.autolink = true;
+    opts.extension.tasklist = true;
 
     struct TocEntry {
         anchor: String,
