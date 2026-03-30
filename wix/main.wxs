@@ -123,6 +123,22 @@
                         </Component>
                     </Directory>
 
+                    <Component Id='DesktopShortcut' Guid='A3E2B8F7-1D94-4C5E-B6A0-7F8E9D2C1A3B'>
+                        <Shortcut Id='DesktopShortcut'
+                            Name='MD Reader'
+                            Description='Read-only markdown viewer'
+                            Directory='DesktopFolder'
+                            Target='[Bin]mdreader.exe'
+                            WorkingDirectory='Bin'
+                            Icon='ProductICO' />
+                        <RegistryValue Root='HKCU'
+                            Key='Software\ophiocus\MDReader'
+                            Name='DesktopShortcut'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes' />
+                    </Component>
+
                     <Component Id='ContextMenuFolder' Guid='C7226919-A4F1-4AB4-AC45-83C3CD6D1AFC'>
                         <RegistryKey Root='HKLM' Key='SOFTWARE\Classes\Directory\shell\MDReader'
                                      ForceCreateOnInstall='yes' ForceDeleteOnUninstall='yes'>
@@ -146,6 +162,7 @@
                     </Component>
                 </Directory>
             </Directory>
+            <Directory Id='DesktopFolder' Name='Desktop' />
         </Directory>
 
         <Feature
@@ -165,6 +182,7 @@
 
             <ComponentRef Id='binary0'/>
 
+            <ComponentRef Id='DesktopShortcut'/>
             <ComponentRef Id='ContextMenuFolder'/>
             <ComponentRef Id='ContextMenuBackground'/>
 
