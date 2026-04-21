@@ -15,10 +15,12 @@
 [CmdletBinding()]
 param(
     # Pinned Chromium snapshot revision.  Bump to a newer number when you want
-    # to refresh; keep it pinned for reproducible builds.  See
-    # https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/
-    # for the list of available revisions.
-    [string]$Revision = '1381562',
+    # to refresh; keep it pinned for reproducible builds.  Not every integer
+    # in the history is a valid snapshot — the Win_x64 bucket only contains
+    # revisions where a full build was uploaded.  If the pinned value is
+    # missing the script falls back to the current LAST_CHANGE pointer.
+    # See https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/
+    [string]$Revision = '1618066',
 
     # Destination directory (relative to repo root).
     [string]$Dest = 'chromium-bundle'
@@ -26,6 +28,30 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'  # massive speedup on Invoke-WebRequest
+
+function Test-ChromiumRevision([string]$rev) {
+    $u = "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/$rev/chrome-win.zip"
+    try {
+        $r = Invoke-WebRequest -Uri $u -Method Head -UseBasicParsing -ErrorAction Stop
+        return ($r.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+# Validate the pinned revision; fall back to the bucket's LAST_CHANGE pointer
+# if the pin is missing.  This keeps builds reproducible most of the time but
+# avoids the whole release failing when an old pin gets pruned.
+if (-not (Test-ChromiumRevision $Revision)) {
+    Write-Host "fetch-chromium: pinned revision $Revision not available, querying LAST_CHANGE..."
+    $latest = (Invoke-WebRequest -Uri 'https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/LAST_CHANGE' -UseBasicParsing).Content.Trim()
+    if (-not $latest -or -not (Test-ChromiumRevision $latest)) {
+        Write-Error "fetch-chromium: cannot resolve a valid Chromium revision (tried '$Revision' and LAST_CHANGE='$latest')"
+        exit 1
+    }
+    Write-Host "fetch-chromium: using LAST_CHANGE revision $latest instead"
+    $Revision = $latest
+}
 
 $url = "https://commondatastorage.googleapis.com/chromium-browser-snapshots/Win_x64/$Revision/chrome-win.zip"
 
