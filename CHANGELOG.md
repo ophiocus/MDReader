@@ -4,6 +4,52 @@ All notable changes to MDReader are documented here.
 
 ---
 
+## [0.3.0] — 2026-04-21
+
+### Added
+
+- **Bundled Chromium** — the Windows MSI installer now ships a pinned
+  Chromium snapshot under `C:\Program Files\mdreader\chromium\`. PDF
+  export works fully offline with no system Chrome/Edge required and no
+  internet connection. Installer size grows from ~5 MB to ~180 MB as a
+  result; auto-update delta is proportional. Resolution order:
+  bundled → system Chrome → system Edge.
+- **CLI markdown-to-PDF converter** — `mdreader.exe` is now both a GUI
+  app and a headless CLI tool. New flags:
+    - `--to-pdf <input>` — convert a single `.md` file or a directory
+      tree to PDF. Output defaults to `<stem>.pdf` in the current
+      working directory.
+    - `-o` / `--output <file>` — explicit output path.
+    - `--help` / `-h`, `--version` / `-V`.
+  Uses the same comrak + Chromium pipeline as the GUI, so output is
+  visually identical. Works from any `cmd.exe` or PowerShell prompt
+  because the MSI adds the install directory to `PATH`. Attaches to the
+  parent console via `AttachConsole(ATTACH_PARENT_PROCESS)` so stdout
+  and exit codes behave correctly under `windows_subsystem = "windows"`.
+- **`render_version_button()` + `render_update_status()`** — update
+  checker extracted into `src/git_update.rs` with a UI matching
+  ExamHelper. Click the version label in the status bar to manually
+  re-check for updates; failed updates now surface in a dedicated
+  red-text error region instead of the shared status message slot.
+
+### Changed
+
+- **Renderer switched from wgpu to glow** — eframe now uses the OpenGL
+  backend rather than wgpu. The wgpu default spins up a full
+  Vulkan/DX12 pipeline which was overkill for a 2D text viewer and
+  produced noticeable idle CPU use. Glow drops idle CPU to near zero.
+- **Idle repaint throttle extended to `UpdateState::Downloading`** —
+  previously only `Checking` was covered, so the app would repaint at
+  uncapped FPS while downloading an MSI update.
+
+### Fixed
+
+- **High idle CPU usage** — combined effect of the glow switch and the
+  repaint-throttle fix. The static document viewer now goes fully idle
+  after a paint when no user input is arriving.
+
+---
+
 ## [0.2.5] — 2026-03-30
 
 ### Added

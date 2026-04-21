@@ -31,9 +31,32 @@ jobs:
           $url  = 'https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311-binaries.zip'
           $zip  = "$env:TEMP\wix311.zip"
           $dest = "$env:TEMP\wix311"
-          Invoke-WebRequest $url -OutFile $zip
+          Invoke-WebRequest $url -OutFile $zip -UseBasicParsing
           Expand-Archive $zip -DestinationPath $dest
           echo "$dest" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # ── Bundled Chromium ─────────────────────────────────────────────────
+      # Download a pinned Chromium snapshot, extract to chromium-bundle/, then
+      # run heat.exe to harvest it into wix/chromium.wxs.  The ComponentGroup
+      # `ChromiumFiles` defined there is referenced from wix/main.wxs.
+      - name: Fetch bundled Chromium
+        shell: pwsh
+        run: .\scripts\fetch-chromium.ps1
+
+      - name: Harvest Chromium into WiX fragment
+        shell: pwsh
+        run: |
+          heat.exe dir chromium-bundle `
+            -cg ChromiumFiles `
+            -dr ChromiumDir `
+            -var var.ChromiumSource `
+            -gg -sfrag -srd -sreg -scom -ke -indent 2 `
+            -out wix\chromium.wxs
+          if (-not (Test-Path wix\chromium.wxs)) {
+            Write-Error "heat failed to produce wix/chromium.wxs"
+            exit 1
+          }
+          Write-Host ("chromium.wxs size: {0:N1} KB" -f ((Get-Item wix\chromium.wxs).Length / 1KB))
 
       - name: Build MSI installer
         run: cargo wix --nocapture

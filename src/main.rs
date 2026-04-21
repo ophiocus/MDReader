@@ -1,8 +1,11 @@
 #![windows_subsystem = "windows"]
 
+mod git_update;
+
 use eframe::egui;
 use egui::{Color32, RichText, ScrollArea};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+use git_update::{check_latest_release, UpdateAvailable, UpdateState};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -11,83 +14,6 @@ use std::{
     process::Command,
     sync::mpsc,
 };
-
-// ─── update checker ───────────────────────────────────────────────────────────
-
-struct UpdateAvailable {
-    version: String,
-    url: String,
-}
-
-enum UpdateState {
-    Checking,
-    Idle,
-    Available(UpdateAvailable),
-    Downloading(mpsc::Receiver<Result<PathBuf, String>>),
-}
-
-fn is_newer(latest: &str, current: &str) -> bool {
-    let parse = |s: &str| -> (u32, u32, u32) {
-        let mut p = s.splitn(3, '.');
-        let a = p.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-        let b = p.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-        let c = p.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-        (a, b, c)
-    };
-    parse(latest) > parse(current)
-}
-
-fn check_latest_release() -> Option<UpdateAvailable> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("MDReader/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let resp: serde_json::Value = client
-        .get("https://api.github.com/repos/ophiocus/MDReader/releases/latest")
-        .send().ok()?.json().ok()?;
-    let tag = resp["tag_name"].as_str()?.trim_start_matches('v').to_string();
-    if !is_newer(&tag, env!("CARGO_PKG_VERSION")) { return None; }
-    let url = resp["assets"].as_array()?.iter()
-        .find(|a| a["name"].as_str().unwrap_or("").ends_with(".msi"))?
-        ["browser_download_url"].as_str()?.to_string();
-    Some(UpdateAvailable { version: tag, url })
-}
-
-fn download_and_install(url: &str, version: &str) -> Result<PathBuf, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("MDReader/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    let bytes = client
-        .get(url)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .and_then(|r| r.bytes())
-        .map_err(|e| format!("Download failed: {e}"))?;
-
-    let path = std::env::temp_dir().join(format!("MDReader-{version}.msi"));
-    std::fs::write(&path, &bytes)
-        .map_err(|e| format!("Failed to write MSI: {e}"))?;
-
-    // Launch installer elevated via powershell Start-Process -Verb RunAs.
-    // Plain `msiexec` from a non-elevated process silently fails on
-    // per-machine installs because /passive suppresses the UAC prompt.
-    let msi_str = path.to_string_lossy();
-    std::process::Command::new("powershell")
-        .args([
-            "-NoProfile", "-Command",
-            &format!(
-                "Start-Process msiexec -ArgumentList '/i \"{msi_str}\" /passive /norestart' -Verb RunAs"
-            ),
-        ])
-        .spawn()
-        .map_err(|e| format!("Failed to launch installer: {e}"))?;
-
-    Ok(path)
-}
 
 // ─── file tree ────────────────────────────────────────────────────────────────
 
@@ -499,8 +425,36 @@ fn html_page(body: &str, title: &str) -> String {
     )
 }
 
-/// Locate Chrome or Edge for headless PDF rendering.
+/// Locate Chromium for headless PDF rendering.
+///
+/// Resolution order:
+///   1. Bundled Chromium next to the installed exe:
+///      `<exe_dir>\..\chromium\chrome-win\chrome.exe`
+///      (MSI installs `mdreader.exe` under `bin\` and Chromium under `chromium\`)
+///   2. Bundled Chromium next to the exe itself (dev/portable layout):
+///      `<exe_dir>\chromium\chrome-win\chrome.exe`
+///   3. System-wide Chrome or Edge.
+///
+/// Bundled Chromium is preferred so the app works fully offline.
 fn find_chrome() -> Option<PathBuf> {
+    // 1 + 2: bundled
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            let bundled_sibling = exe_dir.join("chromium").join("chrome-win").join("chrome.exe");
+            if bundled_sibling.exists() {
+                return Some(bundled_sibling);
+            }
+            if let Some(install_root) = exe_dir.parent() {
+                let bundled_installed =
+                    install_root.join("chromium").join("chrome-win").join("chrome.exe");
+                if bundled_installed.exists() {
+                    return Some(bundled_installed);
+                }
+            }
+        }
+    }
+
+    // 3: system-wide fallback
     let candidates = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -818,17 +772,13 @@ fn rewrite_md_links(
 
 // ─── pdf export ──────────────────────────────────────────────────────────────
 
-/// Export all markdown files in the tree as a single PDF with a clean
-/// hierarchical table of contents.  Every transformation is wrapped in a
-/// try/default pattern: if detection or rewriting fails for a given file
-/// the original content is used verbatim.
+/// GUI wrapper: prompts for output path via native dialog, then calls `build_pdf`.
 fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
     let entries = collect_doc_entries(tree, 0);
     if entries.is_empty() {
         return Err("No markdown files to export.".to_string());
     }
 
-    // ── 1. pick save location ──────────────────────────────────────────────
     let default_name = format!("{root_name}.pdf");
     let pdf_path = rfd::FileDialog::new()
         .add_filter("PDF", &["pdf"])
@@ -836,8 +786,21 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
         .save_file()
         .ok_or_else(|| "Export cancelled.".to_string())?;
 
+    build_pdf(&entries, &pdf_path, root_name)
+}
+
+/// Build a single PDF from a prepared list of doc entries to a specified path.
+/// Shared by the GUI "Export as PDF…" action and the `--to-pdf` CLI flag.
+/// Every transformation is wrapped in a try/default pattern: if detection or
+/// rewriting fails for a given file the original content is used verbatim.
+fn build_pdf(entries: &[DocEntry], pdf_path: &Path, root_name: &str) -> Result<PathBuf, String> {
+    if entries.is_empty() {
+        return Err("No markdown files to export.".to_string());
+    }
+    let pdf_path = pdf_path.to_path_buf();
+
     // ── 2. build path→anchor map ───────────────────────────────────────────
-    let path_map = build_path_map(&entries);
+    let path_map = build_path_map(entries);
 
     // ── 3. comrak options ──────────────────────────────────────────────────
     let mut opts = comrak::Options::default();
@@ -864,7 +827,7 @@ fn export_pdf(tree: &[FileNode], root_name: &str) -> Result<PathBuf, String> {
     let mut body_html = String::new();
     let mut doc_idx = 0usize;
 
-    for entry in &entries {
+    for entry in entries {
         match entry {
             DocEntry::Section { name, depth, .. } => {
                 toc_items.push(TocItem {
@@ -1055,11 +1018,15 @@ struct MDReaderApp {
     /// Transient status message shown in the status bar (e.g. after PDF export).
     status_msg: Option<String>,
     /// Receives the result of the background update check.
-    update_rx: mpsc::Receiver<Option<UpdateAvailable>>,
+    pub update_rx: Option<mpsc::Receiver<Option<UpdateAvailable>>>,
     /// Current state of the update workflow.
-    update_state: UpdateState,
+    pub update_state: UpdateState,
+    /// Persistent error message from a failed update attempt.
+    pub update_error: Option<String>,
     /// Drag-reorder state: (parent path, source index within siblings).
     drag_reorder: Option<(PathBuf, usize)>,
+    /// Cached window title to avoid sending viewport commands every frame.
+    last_title: String,
 }
 
 impl MDReaderApp {
@@ -1094,9 +1061,11 @@ impl MDReaderApp {
             native_ppp,
             drag_zoom: None,
             status_msg: None,
-            update_rx: rx,
+            update_rx: Some(rx),
             update_state: UpdateState::Checking,
+            update_error: None,
             drag_reorder: None,
+            last_title: String::new(),
         }
     }
 
@@ -1173,18 +1142,22 @@ impl MDReaderApp {
 impl eframe::App for MDReaderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // ── poll update channel ──────────────────────────────────────────────
-        if let Ok(result) = self.update_rx.try_recv() {
-            self.update_state = match result {
-                Some(avail) => UpdateState::Available(avail),
-                None => UpdateState::Idle,
-            };
+        if let Some(ref rx) = self.update_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.update_state = match result {
+                    Some(avail) => UpdateState::Available(avail),
+                    None => UpdateState::Idle,
+                };
+                self.update_rx = None;
+            }
         }
 
-        // ── window title ─────────────────────────────────────────────────────
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "MD Reader — {}",
-            self.root_display_name()
-        )));
+        // ── window title (only send when changed to avoid repaint loop) ────
+        let title = format!("MD Reader — {}", self.root_display_name());
+        if title != self.last_title {
+            self.last_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
 
         // ── settings modal ───────────────────────────────────────────────────
         if self.show_settings {
@@ -1331,47 +1304,12 @@ impl eframe::App for MDReaderApp {
         // ── status bar ───────────────────────────────────────────────────────
         egui::TopBottomPanel::bottom("statusbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // Update state UI — shown before status_msg / file path.
-                match &self.update_state {
-                    UpdateState::Checking => {
-                        ui.label(RichText::new("⟳ checking for updates…").weak().size(11.0));
-                        ui.separator();
-                    }
-                    UpdateState::Available(avail) => {
-                        let label = RichText::new(format!("↑ v{} available — click to install", avail.version))
-                            .size(11.0)
-                            .color(Color32::from_rgb(80, 210, 110));
-                        if ui.add(egui::Label::new(label).sense(egui::Sense::click())).clicked() {
-                            let url = avail.url.clone();
-                            let version = avail.version.clone();
-                            let (tx, rx) = mpsc::channel();
-                            std::thread::spawn(move || {
-                                let result = download_and_install(&url, &version);
-                                let _ = tx.send(result);
-                            });
-                            self.update_state = UpdateState::Downloading(rx);
-                        }
-                        ui.separator();
-                    }
-                    UpdateState::Downloading(rx) => {
-                        if let Ok(result) = rx.try_recv() {
-                            match result {
-                                Ok(_) => {
-                                    // Installer launched — exit so it can replace the binary.
-                                    std::process::exit(0);
-                                }
-                                Err(e) => {
-                                    self.status_msg = Some(format!("✘ Update failed: {e}"));
-                                    self.update_state = UpdateState::Idle;
-                                }
-                            }
-                        } else {
-                            ui.label(RichText::new("⬇ downloading update…").weak().size(11.0));
-                        }
-                        ui.separator();
-                    }
-                    UpdateState::Idle => {}
-                }
+                // Version label — clickable to check for updates
+                self.render_version_button(ui);
+
+                ui.separator();
+
+                self.render_update_status(ui);
 
                 // Status message (export result) or file path.
                 if let Some(ref msg) = self.status_msg {
@@ -1504,14 +1442,179 @@ impl eframe::App for MDReaderApp {
                     });
             }
         });
+
+        // ── idle repaint throttle ────────────────────────────────────────────
+        // Only repaint when the user interacts (mouse, keyboard, scroll) or
+        // when we're waiting on the update checker.  For everything else the
+        // app is a static document viewer — zero repaints needed.
+        if matches!(self.update_state, UpdateState::Checking | UpdateState::Downloading(_)) {
+            // Background thread still running — poll once per second
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+        // Otherwise: no request_repaint at all.  egui will still wake on any
+        // user input (mouse move, click, scroll, key press, window resize)
+        // automatically — that's built into the winit/eframe event loop.
     }
 }
 
 // ─── entry point ──────────────────────────────────────────────────────────────
 
+/// Try to attach to the parent console on Windows so stdout/stderr/exit codes
+/// work when the app was launched from cmd.exe or PowerShell.  Necessary
+/// because `windows_subsystem = "windows"` hides the console by default.
+#[cfg(windows)]
+fn attach_parent_console() {
+    extern "system" {
+        fn AttachConsole(dwProcessId: u32) -> i32;
+    }
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+
+#[cfg(not(windows))]
+fn attach_parent_console() {}
+
+fn print_cli_help() {
+    println!("MD Reader v{} — read-only markdown viewer with PDF export", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!("USAGE:");
+    println!("    mdreader                         Launch GUI");
+    println!("    mdreader <DIR>                   Launch GUI with <DIR> as root");
+    println!("    mdreader --to-pdf <IN> [OPTS]    Convert markdown to PDF (headless)");
+    println!("    mdreader --help | -h             Show this help");
+    println!("    mdreader --version | -V          Show version");
+    println!();
+    println!("PDF EXPORT OPTIONS:");
+    println!("    <IN>                             Path to a .md file or a directory");
+    println!("                                     tree containing markdown files.");
+    println!("    -o, --output <FILE>              Output PDF path");
+    println!("                                     (default: <IN stem>.pdf in CWD)");
+    println!();
+    println!("EXAMPLES:");
+    println!("    mdreader --to-pdf notes.md");
+    println!("    mdreader --to-pdf ./docs -o book.pdf");
+    println!();
+    println!("PDF export uses bundled Chromium (no internet required).");
+}
+
+/// Collect doc entries from a single-file OR directory input for CLI PDF export.
+fn collect_cli_entries(input: &Path) -> Result<(Vec<DocEntry>, String), String> {
+    if input.is_file() {
+        let name = input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document")
+            .to_string();
+        Ok((
+            vec![DocEntry::Document { path: input.to_path_buf(), depth: 0 }],
+            name,
+        ))
+    } else if input.is_dir() {
+        let order = OrderConfig::default();
+        let root = input.to_string_lossy().into_owned();
+        let tree = build_tree(&root, &order);
+        let entries = collect_doc_entries(&tree, 0);
+        if entries.is_empty() {
+            return Err(format!("No markdown files found in {}", input.display()));
+        }
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("export")
+            .to_string();
+        Ok((entries, name))
+    } else {
+        Err(format!("Input not found: {}", input.display()))
+    }
+}
+
+/// Handle `--to-pdf` CLI invocation.  Returns exit code.
+fn run_cli_to_pdf(args: &[String]) -> i32 {
+    let mut input: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: {} requires a value", args[i - 1]);
+                    return 2;
+                }
+                output = Some(PathBuf::from(&args[i]));
+            }
+            a if input.is_none() => {
+                input = Some(PathBuf::from(a));
+            }
+            a => {
+                eprintln!("error: unexpected argument: {a}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+
+    let input = match input {
+        Some(p) => p,
+        None => {
+            eprintln!("error: --to-pdf requires an input path");
+            return 2;
+        }
+    };
+
+    let (entries, stem) = match collect_cli_entries(&input) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 1;
+        }
+    };
+
+    let output = output.unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(format!("{stem}.pdf"))
+    });
+
+    match build_pdf(&entries, &output, &stem) {
+        Ok(p) => {
+            println!("PDF written: {}", p.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            1
+        }
+    }
+}
+
 fn main() {
-    // Check if first argument is a valid directory (used by context menu).
-    let cli_root: Option<String> = std::env::args().nth(1).and_then(|arg| {
+    // ── CLI argument handling ────────────────────────────────────────────────
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+
+    // Help / version flags
+    if raw.iter().any(|a| a == "--help" || a == "-h") {
+        attach_parent_console();
+        print_cli_help();
+        std::process::exit(0);
+    }
+    if raw.iter().any(|a| a == "--version" || a == "-V") {
+        attach_parent_console();
+        println!("mdreader {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
+    // --to-pdf headless mode
+    if let Some(pos) = raw.iter().position(|a| a == "--to-pdf") {
+        attach_parent_console();
+        let code = run_cli_to_pdf(&raw[pos + 1..]);
+        std::process::exit(code);
+    }
+
+    // GUI mode: first arg (if any) is a directory to open.
+    let cli_root: Option<String> = raw.into_iter().next().and_then(|arg| {
         if std::path::Path::new(&arg).is_dir() {
             Some(arg)
         } else {

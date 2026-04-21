@@ -1,6 +1,6 @@
 [package]
 name = "mdreader"
-version = "0.2.5"
+version = "0.3.0"
 edition = "2021"
 authors = ["ophiocus <csantanad@gmail.com>"]
 description = "Read-only Windows markdown viewer built with Rust and egui"
@@ -18,6 +18,13 @@ assets = [
     ["README.md", "usr/share/doc/mdreader/README.md", "644"],
 ]
 
+[package.metadata.wix]
+# Pass -dChromiumSource to candle.exe so the heat-harvested wix/chromium.wxs
+# fragment (which uses var.ChromiumSource for File Source= paths) resolves
+# correctly.  The `chromium-bundle` directory is populated by
+# scripts/fetch-chromium.ps1 as a pre-build step.
+compiler-args = ["-dChromiumSource=chromium-bundle"]
+
 [package.metadata.bundle]
 name = "MD Reader"
 identifier = "com.ophiocus.mdreader"
@@ -26,7 +33,7 @@ short_description = "Read-only markdown viewer"
 copyright = "Copyright © 2024 ophiocus"
 
 [dependencies]
-eframe = "0.28"
+eframe = { version = "0.28", default-features = false, features = ["default_fonts", "glow"] }
 egui_commonmark = { version = "0.17", features = ["better_syntax_highlighting"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

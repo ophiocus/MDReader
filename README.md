@@ -104,9 +104,9 @@ On startup MDReader silently checks [GitHub Releases](https://github.com/ophiocu
 ## Requirements
 
 - Windows 10 or 11 (64-bit)
-- [Rust toolchain](https://rustup.rs/) 1.75 or later (stable)
+- [Rust toolchain](https://rustup.rs/) 1.75 or later (stable) *(build only)*
 
-No additional system libraries are required. All dependencies are compiled into the binary.
+No additional runtime dependencies. The MSI installer ships a bundled Chromium snapshot used for PDF export, so the installed application works fully offline — no system Chrome or Edge required, no internet connection needed.
 
 ---
 
@@ -130,6 +130,20 @@ To run a debug build during development:
 cargo run
 ```
 
+### Building the MSI installer (with bundled Chromium)
+
+The installer bundles a pinned Chromium snapshot so PDF export works offline on any Windows machine. To build the MSI locally:
+
+```
+pwsh .\scripts\fetch-chromium.ps1
+heat.exe dir chromium-bundle -cg ChromiumFiles -dr ChromiumDir -var var.ChromiumSource -gg -sfrag -srd -sreg -scom -ke -out wix\chromium.wxs
+cargo wix --nocapture
+```
+
+The first step downloads the pinned Chromium revision (~180 MB) to `chromium-bundle\`. The second harvests it into a WiX fragment. The third assembles the final MSI at `target\wix\mdreader-<version>-x86_64.msi`.
+
+CI (`.github/workflows/release.yml`) performs all three steps automatically on every `v*` tag push. See `scripts/fetch-chromium.ps1` to bump the pinned Chromium revision.
+
 ---
 
 ## Usage
@@ -141,9 +155,24 @@ cargo run
 5. Use **View > Dark mode / Light mode** to toggle the colour scheme.
 6. Adjust zoom by dragging the percentage label in the bottom-right status bar, or via **View** menu presets.
 7. Use **File > Refresh tree** to rescan the root after adding or removing files on disk.
-8. Use **File > Export as PDF…** to save the currently open file as a styled PDF (requires Chrome or Edge).
+8. Use **File > Export as PDF…** to save the currently open file as a styled PDF. Rendering uses the bundled Chromium shipped with the installer (no network, no system browser required).
 
 The application is read-only by design — it never writes to any markdown file.
+
+### Command-line PDF conversion
+
+The installed `mdreader.exe` is also a headless CLI tool for converting markdown to PDF from shell scripts, batch files, or CI pipelines:
+
+```
+mdreader --to-pdf notes.md                       # single file → notes.pdf in CWD
+mdreader --to-pdf notes.md -o out\report.pdf     # single file → custom path
+mdreader --to-pdf .\docs -o book.pdf             # whole tree → single PDF with TOC
+mdreader --help                                  # full usage
+```
+
+The CLI uses the same rendering pipeline as **File > Export as PDF…** (comrak for markdown, bundled Chromium for print-to-PDF), so output is visually identical. When a directory is passed, every `.md` file under it is concatenated into one PDF with an auto-generated hierarchical table of contents, matching the GUI export.
+
+Because the MSI adds the install directory to `PATH`, `mdreader --to-pdf ...` works from any `cmd.exe` or PowerShell prompt after installation.
 
 ---
 
@@ -190,4 +219,4 @@ The file is created automatically on first run and updated on every settings cha
 - **Search** — full-text search across all indexed markdown files.
 - **Recent files** — quick-access list of recently opened documents.
 - **External link handling** — open HTTP/S links in the default browser on click.
-- **PDF batch export** — export all files under a folder to a single merged PDF.
+- **PDF batch export** — export all files under a folder to a single merged PDF. *(shipped in v0.3.0; available from the GUI menu and via `mdreader --to-pdf <dir>` on the CLI)*

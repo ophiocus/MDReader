@@ -160,6 +160,18 @@
                             <RegistryValue Type='string' Value='"[Bin]mdreader.exe" "%V"' />
                         </RegistryKey>
                     </Component>
+
+                    <!--
+                      Bundled Chromium tree.  Populated at build time by running
+                      `heat.exe` against the staged `chromium-bundle\` directory
+                      (see scripts/fetch-chromium.ps1 and .github/workflows/release.yml).
+                      heat generates wix/chromium.wxs, which defines the
+                      ComponentGroup `ChromiumFiles` referenced in the Feature below.
+
+                      The `chromium\chrome-win\chrome.exe` layout matches the shape
+                      expected by find_chrome() in src/main.rs.
+                    -->
+                    <Directory Id='ChromiumDir' Name='chromium' />
                 </Directory>
             </Directory>
             <Directory Id='DesktopFolder' Name='Desktop' />
@@ -185,6 +197,9 @@
             <ComponentRef Id='DesktopShortcut'/>
             <ComponentRef Id='ContextMenuFolder'/>
             <ComponentRef Id='ContextMenuBackground'/>
+
+            <!-- Heat-harvested Chromium tree (see wix/chromium.wxs, generated). -->
+            <ComponentGroupRef Id='ChromiumFiles'/>
 
             <Feature
                 Id='Environment'
