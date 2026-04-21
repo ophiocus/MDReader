@@ -8,6 +8,16 @@ on:
 permissions:
   contents: write
 
+# Run JavaScript actions pinned to Node 20 on Node 24 instead.  GitHub is
+# deprecating the Node-20 runtime for actions (forced default on 2026-06-02,
+# removed on 2026-09-16).  actions/upload-artifact@v5, actions/download-artifact@v5,
+# and softprops/action-gh-release@v2 still declare Node 20 in their action.yml
+# as of this writing; setting this env var opts us in to Node 24 early so we
+# suppress the deprecation warnings and don't get surprised when the default
+# flips.  Safe to remove once those actions publish Node-24 releases.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ── Windows ──────────────────────────────────────────────────────────────────
   build-windows:
