@@ -26,6 +26,7 @@ The intended audience is anyone who keeps a local library of markdown — docume
 - **Collapsible sidebar** — folders are shown as collapsible headers, sorted directories-first then alphabetically. The currently open file is highlighted.
 - **Rendered markdown** — full commonmark rendering via `egui_commonmark`, including headings, tables, blockquotes, inline code, and fenced code blocks.
 - **Syntax highlighting** — fenced code blocks with language tags (` ```rust `, ` ```python `, ` ```bash `, etc.) are rendered with full syntax colouring via the `syntect` backend bundled with `egui_commonmark`.
+- **Inline images** — `![alt](path.png)` renders PNG, JPEG, WebP, GIF, BMP, and SVG. Paths are resolved relative to the markdown file's directory, so `![flow](img/flow.png)` works as expected. Absolute paths, `file://` URLs, `http(s)://` URLs, and `data:` URIs are all supported. The same resolution applies to PDF export, so Chromium can locate every image when printing.
 - **Light / dark mode** — toggle under View menu; preference is saved immediately.
 - **Zoom control** — drag the `%` label in the status bar left or right for continuous scaling (range 25–400%), or pick a preset from View > 75% / 100% / 125% / 150% / 200% / Reset zoom. The zoom level is persisted across sessions.
 - **Root folder as TOC title** — the sidebar header displays the root folder name, making the tree act as a named table of contents for the documentation set.
@@ -202,8 +203,10 @@ The file is created automatically on first run and updated on every settings cha
 
 | Crate | Version | Purpose |
 |---|---|---|
-| eframe | 0.28 | Native windowing and GPU-accelerated rendering (egui backend) |
+| eframe | 0.28 | Native windowing and GPU-accelerated rendering (egui backend, glow) |
 | egui_commonmark | 0.17 | Commonmark markdown rendering with syntect syntax highlighting |
+| egui_extras | 0.28 | Image loaders (PNG/JPEG/WebP/GIF/BMP/SVG/http) for inline images |
+| image | 0.24 | Raster image format decoders |
 | serde / serde_json | 1 | Config serialisation |
 | dirs | 5 | Platform-aware paths (Documents, AppData) |
 | rfd | 0.14 | Native file/folder picker dialog |

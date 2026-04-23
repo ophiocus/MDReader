@@ -4,6 +4,34 @@ All notable changes to MDReader are documented here.
 
 ---
 
+## [0.3.1] — 2026-04-22
+
+### Added
+
+- **Inline image rendering** — `![alt](path.png)` now actually displays
+  images. PNG, JPEG, WebP, GIF, BMP, and SVG all work. Relative paths
+  are resolved against the directory of the markdown file, so
+  `![flow](img/flow.png)` loads `<docroot>/img/flow.png` without the
+  user having to write absolute paths. Absolute paths, `file://` URLs,
+  `http(s)://` URLs, and `data:` URIs are all supported. The same
+  resolution applies to PDF export, so Chromium can locate every image
+  when printing.
+- **Unit tests for `resolve_image_uris`** — covers inline syntax,
+  reference-style definitions, title attributes, http URLs (untouched),
+  non-image links (untouched), and plain text (untouched).
+
+### Changed
+
+- **CI now opts into Node 24 for JavaScript actions** — sets
+  `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` at the workflow level to
+  suppress the deprecation warnings emitted by `actions/upload-artifact@v5`,
+  `actions/download-artifact@v5`, and `softprops/action-gh-release@v2`,
+  which all still declare Node 20 in their action.yml. GitHub is
+  forcing Node 24 as the default on 2026-06-02 and removing Node 20 on
+  2026-09-16; opting in early protects against the flip.
+
+---
+
 ## [0.3.0] — 2026-04-21
 
 ### Added

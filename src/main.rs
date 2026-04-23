@@ -467,6 +467,143 @@ fn find_chrome() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
+// ─── image uri resolution ────────────────────────────────────────────────────
+
+fn has_uri_scheme(uri: &str) -> bool {
+    uri.starts_with("http://")
+        || uri.starts_with("https://")
+        || uri.starts_with("file://")
+        || uri.starts_with("data:")
+        || uri.starts_with('#')
+}
+
+fn to_file_url(path: &str, base_dir: &Path) -> String {
+    let trimmed = path.trim();
+    let p = Path::new(trimmed);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base_dir.join(trimmed)
+    };
+    // Normalize: forward slashes, then `file:///C:/...` on Windows vs
+    // `file:///path/...` on Unix.
+    let s = abs.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}")
+    }
+}
+
+/// Rewrite relative image URIs in markdown to absolute `file://` URLs so
+/// egui's image loader (which receives the raw URI string) can find them.
+///
+/// Handles both inline `![alt](path)` syntax and reference-style
+/// `![alt][id]` ... `[id]: path` definitions.  URIs that already carry a
+/// scheme (http, https, file, data) are left untouched.
+///
+/// Line-oriented implementation — assumes the `![..](..)` construct doesn't
+/// cross newlines, which matches every real-world markdown document.  The
+/// PDF export pipeline applies the same transform so Chromium headless can
+/// also resolve local images.
+fn resolve_image_uris(content: &str, base_dir: &Path) -> String {
+    let mut out = String::with_capacity(content.len() + 64);
+    for (idx, raw_line) in content.split_inclusive('\n').enumerate() {
+        let _ = idx;
+        // Reference-style definition: `[id]: path "title"`
+        let trimmed = raw_line.trim_start();
+        if trimmed.starts_with('[') {
+            if let Some(bracket_end) = trimmed.find("]:") {
+                let indent_len = raw_line.len() - trimmed.len();
+                let id_part = &trimmed[..=bracket_end + 1];
+                let rest_with_nl = &trimmed[bracket_end + 2..];
+                // Strip trailing newline for parsing, remember it
+                let (rest, tail) = match rest_with_nl.strip_suffix("\r\n") {
+                    Some(r) => (r, "\r\n"),
+                    None => match rest_with_nl.strip_suffix('\n') {
+                        Some(r) => (r, "\n"),
+                        None => (rest_with_nl, ""),
+                    },
+                };
+                let rest = rest.trim_start();
+                let (url_raw, title) = match rest.find(char::is_whitespace) {
+                    Some(sp) => (rest[..sp].trim(), rest[sp..].trim()),
+                    None => (rest.trim(), ""),
+                };
+                if !url_raw.is_empty() && !has_uri_scheme(url_raw) {
+                    out.push_str(&raw_line[..indent_len]);
+                    out.push_str(id_part);
+                    out.push(' ');
+                    out.push_str(&to_file_url(url_raw, base_dir));
+                    if !title.is_empty() {
+                        out.push(' ');
+                        out.push_str(title);
+                    }
+                    out.push_str(tail);
+                    continue;
+                }
+            }
+        }
+
+        // Inline images on this line: scan for `![` ... `](` ... `)`.
+        let mut rewritten = String::with_capacity(raw_line.len());
+        let mut cursor = 0usize;
+        let line = raw_line;
+        while let Some(bang) = line[cursor..].find("![") {
+            let bang_abs = cursor + bang;
+            // Not escaped?
+            if bang_abs > 0 && line.as_bytes()[bang_abs - 1] == b'\\' {
+                rewritten.push_str(&line[cursor..bang_abs + 2]);
+                cursor = bang_abs + 2;
+                continue;
+            }
+            let after_bang = bang_abs + 2;
+            // Find `]` closing the alt text.
+            let alt_close = match line[after_bang..].find(']') {
+                Some(p) => after_bang + p,
+                None => break,
+            };
+            // Must be followed immediately by `(`
+            if line.as_bytes().get(alt_close + 1) != Some(&b'(') {
+                rewritten.push_str(&line[cursor..alt_close + 1]);
+                cursor = alt_close + 1;
+                continue;
+            }
+            let url_start = alt_close + 2;
+            let url_close = match line[url_start..].find(')') {
+                Some(p) => url_start + p,
+                None => break,
+            };
+            let alt = &line[after_bang..alt_close];
+            let inside = &line[url_start..url_close];
+            let (url_raw, title) = match inside.find(char::is_whitespace) {
+                Some(sp) => (inside[..sp].trim(), inside[sp..].trim()),
+                None => (inside.trim(), ""),
+            };
+            let new_url = if url_raw.is_empty() || has_uri_scheme(url_raw) {
+                url_raw.to_string()
+            } else {
+                to_file_url(url_raw, base_dir)
+            };
+            // Emit everything before this image, then the rewritten image.
+            rewritten.push_str(&line[cursor..bang_abs]);
+            rewritten.push_str("![");
+            rewritten.push_str(alt);
+            rewritten.push_str("](");
+            rewritten.push_str(&new_url);
+            if !title.is_empty() {
+                rewritten.push(' ');
+                rewritten.push_str(title);
+            }
+            rewritten.push(')');
+            cursor = url_close + 1;
+        }
+        rewritten.push_str(&line[cursor..]);
+        out.push_str(&rewritten);
+    }
+    out
+}
+
 // ─── smart TOC helpers (all fallible → default on failure) ───────────────────
 
 /// Try to extract the first `# heading` from markdown content.
@@ -837,8 +974,12 @@ fn build_pdf(entries: &[DocEntry], pdf_path: &Path, root_name: &str) -> Result<P
                 });
             }
             DocEntry::Document { path, depth } => {
-                let raw_content = fs::read_to_string(path)
+                let raw_disk = fs::read_to_string(path)
                     .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+                // Rewrite relative image paths to absolute file:// URLs so
+                // Chromium can locate them when rendering the temp HTML.
+                let base_dir = path.parent().unwrap_or(Path::new(""));
+                let raw_content = resolve_image_uris(&raw_disk, base_dir);
 
                 let anchor = format!("doc-{doc_idx}");
                 doc_idx += 1;
@@ -1042,6 +1183,12 @@ impl MDReaderApp {
         apply_theme(&cc.egui_ctx, config.dark_mode);
         cc.egui_ctx.set_pixels_per_point(native_ppp * config.zoom);
 
+        // Register image loaders so `![alt](foo.png)` in markdown renders
+        // actual bitmaps instead of silently displaying nothing.  Handles
+        // PNG/JPEG/WebP/GIF/BMP via the `image` crate, SVG via resvg, and
+        // http(s) URLs via ehttp.
+        egui_extras::install_image_loaders(&cc.egui_ctx);
+
         let order = OrderConfig::load();
         let tree = build_tree(&config.root_path, &order);
         let root_input = config.root_path.clone();
@@ -1072,7 +1219,8 @@ impl MDReaderApp {
     fn load_file(&mut self, path: PathBuf) {
         match fs::read_to_string(&path) {
             Ok(c) => {
-                self.file_content = c;
+                let base_dir = path.parent().unwrap_or(Path::new(""));
+                self.file_content = resolve_image_uris(&c, base_dir);
                 self.selected_file = Some(path);
             }
             Err(e) => {
@@ -1636,4 +1784,61 @@ fn main() {
         Box::new(|cc| Ok(Box::new(MDReaderApp::new(cc, cli_root)))),
     )
     .expect("Failed to launch MD Reader");
+}
+
+// ─── tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base() -> PathBuf {
+        // Use forward slashes to make expected strings portable.
+        PathBuf::from("C:/docs")
+    }
+
+    #[test]
+    fn resolves_relative_inline_image() {
+        let src = "See ![diagram](img/flow.png) below.";
+        let got = resolve_image_uris(src, &base());
+        assert!(got.contains("![diagram](file:///C:/docs/img/flow.png)"),
+            "got: {got}");
+    }
+
+    #[test]
+    fn preserves_http_url() {
+        let src = "![logo](https://example.com/logo.png)";
+        let got = resolve_image_uris(src, &base());
+        assert_eq!(got, "![logo](https://example.com/logo.png)");
+    }
+
+    #[test]
+    fn preserves_title_attribute() {
+        let src = r#"![alt](foo.png "caption text")"#;
+        let got = resolve_image_uris(src, &base());
+        assert!(got.contains(r#"(file:///C:/docs/foo.png "caption text")"#),
+            "got: {got}");
+    }
+
+    #[test]
+    fn rewrites_reference_definition() {
+        let src = "![pic][p1]\n\n[p1]: assets/a.jpg\n";
+        let got = resolve_image_uris(src, &base());
+        assert!(got.contains("[p1]: file:///C:/docs/assets/a.jpg"),
+            "got: {got}");
+    }
+
+    #[test]
+    fn leaves_non_image_links_alone() {
+        let src = "See [the doc](other.md) for details.";
+        let got = resolve_image_uris(src, &base());
+        assert_eq!(got, src);
+    }
+
+    #[test]
+    fn handles_no_images() {
+        let src = "# Plain text\n\nNo images here.\n";
+        let got = resolve_image_uris(src, &base());
+        assert_eq!(got, src);
+    }
 }
