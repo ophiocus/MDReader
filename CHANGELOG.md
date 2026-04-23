@@ -4,6 +4,38 @@ All notable changes to MDReader are documented here.
 
 ---
 
+## [0.3.2] — 2026-04-23
+
+### Added
+
+- **Figure captions** — a standalone image with a CommonMark title
+  attribute is now treated as a figure:
+  ```markdown
+  ![schematic](img/widget.png "Figure 1 — Widget internals")
+  ```
+  In the egui viewer, the caption renders as an italic line directly
+  below the image. In PDF export, the same source is rewritten to a
+  real `<figure><img><figcaption>…</figcaption></figure>` block and
+  styled with centered alignment and `page-break-inside: avoid` so
+  figures don't split across pages. Inline images with titles inside a
+  paragraph continue to behave as ordinary markdown (title → tooltip).
+  Zero new syntax to learn — it's standard CommonMark.
+- **Raw HTML passthrough in PDF export** — `comrak` is now invoked with
+  `render.unsafe_ = true` so the `<figure>` blocks generated during
+  export survive to the HTML. Because the source is the user's own
+  local markdown, the usual XSS concerns don't apply.
+- **11 more unit tests** — cover the figure detector (5), the markdown
+  expander (3), the HTML expander (2), and idempotence on non-figure
+  content (1). Total test count: 17.
+
+### Changed
+
+- **PDF stylesheet extended** — `figure`, `figure img`, and
+  `figcaption` rules added for a clean centered layout with italic
+  caption text.
+
+---
+
 ## [0.3.1] — 2026-04-22
 
 ### Added

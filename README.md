@@ -27,6 +27,11 @@ The intended audience is anyone who keeps a local library of markdown — docume
 - **Rendered markdown** — full commonmark rendering via `egui_commonmark`, including headings, tables, blockquotes, inline code, and fenced code blocks.
 - **Syntax highlighting** — fenced code blocks with language tags (` ```rust `, ` ```python `, ` ```bash `, etc.) are rendered with full syntax colouring via the `syntect` backend bundled with `egui_commonmark`.
 - **Inline images** — `![alt](path.png)` renders PNG, JPEG, WebP, GIF, BMP, and SVG. Paths are resolved relative to the markdown file's directory, so `![flow](img/flow.png)` works as expected. Absolute paths, `file://` URLs, `http(s)://` URLs, and `data:` URIs are all supported. The same resolution applies to PDF export, so Chromium can locate every image when printing.
+- **Figure captions** — a standalone image with a CommonMark title attribute becomes a figure:
+  ```markdown
+  ![schematic](img/widget.png "Figure 1 — Widget internals")
+  ```
+  In the viewer, the caption renders as an italic line directly below the image. In PDF export, the same source is emitted as a real `<figure><figcaption>…</figcaption></figure>` so Chromium produces a centered, grouped figure that does not split across page breaks. Inline images with titles inside a paragraph continue to behave as ordinary markdown (title → tooltip).
 - **Light / dark mode** — toggle under View menu; preference is saved immediately.
 - **Zoom control** — drag the `%` label in the status bar left or right for continuous scaling (range 25–400%), or pick a preset from View > 75% / 100% / 125% / 150% / 200% / Reset zoom. The zoom level is persisted across sessions.
 - **Root folder as TOC title** — the sidebar header displays the root folder name, making the tree act as a named table of contents for the documentation set.

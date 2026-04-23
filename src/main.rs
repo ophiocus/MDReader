@@ -407,6 +407,10 @@ fn html_page(body: &str, title: &str) -> String {
                 padding-left: 1em; color: #555; }}
   hr {{ border: none; border-top: 1px solid #ddd; margin: 2em 0; }}
   img {{ max-width: 100%; }}
+  figure {{ margin: 1.5em auto; text-align: center; page-break-inside: avoid; }}
+  figure img {{ max-width: 100%; display: block; margin: 0 auto; }}
+  figcaption {{ font-style: italic; color: #555; font-size: 0.92em;
+                margin-top: 0.4em; text-align: center; }}
   .toc {{ margin-bottom: 2em; }}
   .toc h1 {{ font-size: 1.6em; border-bottom: 2px solid #333; padding-bottom: .3em; }}
   .toc ul {{ padding-left: 1.4em; list-style: none; margin: 0.2em 0; }}
@@ -600,6 +604,146 @@ fn resolve_image_uris(content: &str, base_dir: &Path) -> String {
         }
         rewritten.push_str(&line[cursor..]);
         out.push_str(&rewritten);
+    }
+    out
+}
+
+// ─── figure captions ─────────────────────────────────────────────────────────
+//
+// Markdown has no first-class figure syntax, but CommonMark already allows a
+// *title attribute* on images:
+//
+//     ![alt](path.png "My caption")
+//
+// By default the title just becomes a tooltip.  We treat a paragraph-only
+// image with a title as a figure and expand it:
+//
+//   - GUI viewer: rewrite to `![alt](path.png)\n\n*caption*` — renders the
+//     caption as an italic line immediately below the image.  egui_commonmark
+//     has no <figure> primitive and no per-node rendering hook at 0.17, so
+//     this is the lightest path that yields the same visual reading without
+//     touching the renderer.
+//
+//   - PDF export: emit raw HTML `<figure><img><figcaption>...</figcaption></figure>`
+//     so Chromium produces a properly grouped, styled, and semantic figure.
+//
+// Both branches run AFTER `resolve_image_uris` so the URL is already absolute.
+
+/// If `line` is a standalone image with a title attribute, return
+/// `(alt, url, caption)`.  Otherwise None.
+///
+/// "Standalone" = nothing on the line except the image expression (leading
+/// and trailing whitespace is fine).  Inline images with titles inside a
+/// wider paragraph continue to behave as ordinary markdown (title → tooltip).
+fn parse_figure_line(line: &str) -> Option<(&str, &str, String)> {
+    let t = line.trim();
+    if !t.starts_with("![") || !t.ends_with(')') {
+        return None;
+    }
+    let alt_end = t.find("](")?;
+    let alt = &t[2..alt_end];
+    let inside = &t[alt_end + 2..t.len() - 1];
+    // Title syntax requires whitespace between url and quoted title.
+    let sp = inside.find(char::is_whitespace)?;
+    let url = inside[..sp].trim();
+    if url.is_empty() {
+        return None;
+    }
+    let rest = inside[sp..].trim();
+    if rest.len() < 2 {
+        return None;
+    }
+    let quote = rest.as_bytes()[0];
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    if !rest.ends_with(quote as char) {
+        return None;
+    }
+    let caption = rest[1..rest.len() - 1].to_string();
+    Some((alt, url, caption))
+}
+
+/// GUI-side expansion: rewrite figure paragraphs to image + italic caption.
+fn expand_figures_md(content: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 64);
+    for line in content.split_inclusive('\n') {
+        let (body, tail) = match line.strip_suffix("\r\n") {
+            Some(b) => (b, "\r\n"),
+            None => match line.strip_suffix('\n') {
+                Some(b) => (b, "\n"),
+                None => (line, ""),
+            },
+        };
+        if let Some((alt, url, caption)) = parse_figure_line(body) {
+            // Escape `*` inside the caption so it doesn't collide with the
+            // italic delimiters we're about to add.
+            let caption_esc = caption.replace('*', r"\*");
+            out.push_str("![");
+            out.push_str(alt);
+            out.push_str("](");
+            out.push_str(url);
+            out.push_str(")");
+            out.push_str(tail);
+            out.push_str(tail); // blank line before caption
+            out.push('*');
+            out.push_str(&caption_esc);
+            out.push('*');
+            out.push_str(tail);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// PDF-side expansion: rewrite figure paragraphs to an HTML `<figure>` block.
+/// Requires the markdown renderer to have raw-HTML passthrough enabled.
+fn expand_figures_html(content: &str) -> String {
+    let mut out = String::with_capacity(content.len() + 128);
+    for line in content.split_inclusive('\n') {
+        let (body, tail) = match line.strip_suffix("\r\n") {
+            Some(b) => (b, "\r\n"),
+            None => match line.strip_suffix('\n') {
+                Some(b) => (b, "\n"),
+                None => (line, ""),
+            },
+        };
+        if let Some((alt, url, caption)) = parse_figure_line(body) {
+            // Markdown requires a blank line before and after raw HTML blocks
+            // for the parser to treat them as block-level.
+            out.push_str(tail);
+            out.push_str("<figure>");
+            out.push_str(&format!(
+                r#"<img src="{}" alt="{}">"#,
+                escape_html(url),
+                escape_html(alt)
+            ));
+            out.push_str(&format!(
+                "<figcaption>{}</figcaption>",
+                escape_html(&caption)
+            ));
+            out.push_str("</figure>");
+            out.push_str(tail);
+            out.push_str(tail);
+        } else {
+            out.push_str(line);
+        }
     }
     out
 }
@@ -945,6 +1089,10 @@ fn build_pdf(entries: &[DocEntry], pdf_path: &Path, root_name: &str) -> Result<P
     opts.extension.strikethrough = true;
     opts.extension.autolink = true;
     opts.extension.tasklist = true;
+    // Let raw HTML blocks through — needed for the <figure>/<figcaption>
+    // markup emitted by `expand_figures_html`.  The source is the user's own
+    // markdown, loaded locally, so the usual XSS concerns don't apply here.
+    opts.render.unsafe_ = true;
 
     // ── 4. build TOC + body in a single pass ───────────────────────────────
     //
@@ -977,9 +1125,12 @@ fn build_pdf(entries: &[DocEntry], pdf_path: &Path, root_name: &str) -> Result<P
                 let raw_disk = fs::read_to_string(path)
                     .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
                 // Rewrite relative image paths to absolute file:// URLs so
-                // Chromium can locate them when rendering the temp HTML.
+                // Chromium can locate them when rendering the temp HTML, then
+                // expand figure-style paragraphs (image + title attribute) to
+                // semantic <figure>/<figcaption> HTML.
                 let base_dir = path.parent().unwrap_or(Path::new(""));
-                let raw_content = resolve_image_uris(&raw_disk, base_dir);
+                let resolved = resolve_image_uris(&raw_disk, base_dir);
+                let raw_content = expand_figures_html(&resolved);
 
                 let anchor = format!("doc-{doc_idx}");
                 doc_idx += 1;
@@ -1220,7 +1371,8 @@ impl MDReaderApp {
         match fs::read_to_string(&path) {
             Ok(c) => {
                 let base_dir = path.parent().unwrap_or(Path::new(""));
-                self.file_content = resolve_image_uris(&c, base_dir);
+                let resolved = resolve_image_uris(&c, base_dir);
+                self.file_content = expand_figures_md(&resolved);
                 self.selected_file = Some(path);
             }
             Err(e) => {
@@ -1840,5 +1992,82 @@ mod tests {
         let src = "# Plain text\n\nNo images here.\n";
         let got = resolve_image_uris(src, &base());
         assert_eq!(got, src);
+    }
+
+    // ── figure captions ──────────────────────────────────────────────────
+
+    #[test]
+    fn detects_standalone_figure_with_title() {
+        let line = r#"![schematic](foo.png "Figure 1")"#;
+        let got = parse_figure_line(line);
+        assert_eq!(got, Some(("schematic", "foo.png", "Figure 1".to_string())));
+    }
+
+    #[test]
+    fn detects_figure_with_surrounding_whitespace() {
+        let line = r#"   ![a](x.png "cap")   "#;
+        assert_eq!(parse_figure_line(line), Some(("a", "x.png", "cap".to_string())));
+    }
+
+    #[test]
+    fn rejects_image_without_title() {
+        assert_eq!(parse_figure_line("![a](x.png)"), None);
+    }
+
+    #[test]
+    fn rejects_inline_image_in_paragraph() {
+        let line = r#"See ![a](x "c") for details."#;
+        assert_eq!(parse_figure_line(line), None);
+    }
+
+    #[test]
+    fn rejects_non_image_line() {
+        assert_eq!(parse_figure_line("# Heading"), None);
+        assert_eq!(parse_figure_line("just text"), None);
+    }
+
+    #[test]
+    fn expand_figures_md_adds_italic_caption() {
+        let src = "Intro.\n\n![diag](foo.png \"Figure 1: the flow\")\n\nMore.\n";
+        let got = expand_figures_md(src);
+        assert!(got.contains("![diag](foo.png)"), "got: {got}");
+        assert!(got.contains("*Figure 1: the flow*"), "got: {got}");
+    }
+
+    #[test]
+    fn expand_figures_md_escapes_asterisks_in_caption() {
+        let src = "![a](x.png \"see the * algorithm\")\n";
+        let got = expand_figures_md(src);
+        assert!(got.contains(r"*see the \* algorithm*"), "got: {got}");
+    }
+
+    #[test]
+    fn expand_figures_md_leaves_plain_images_alone() {
+        let src = "![a](x.png)\n";
+        assert_eq!(expand_figures_md(src), src);
+    }
+
+    #[test]
+    fn expand_figures_html_emits_figure_tag() {
+        let src = "![diag](foo.png \"Figure 1\")\n";
+        let got = expand_figures_html(src);
+        assert!(got.contains("<figure>"), "got: {got}");
+        assert!(got.contains(r#"<img src="foo.png" alt="diag">"#), "got: {got}");
+        assert!(got.contains("<figcaption>Figure 1</figcaption>"), "got: {got}");
+        assert!(got.contains("</figure>"), "got: {got}");
+    }
+
+    #[test]
+    fn expand_figures_html_escapes_special_chars_in_caption() {
+        let src = "![a](x.png \"A & B <c>\")\n";
+        let got = expand_figures_html(src);
+        assert!(got.contains("A &amp; B &lt;c&gt;"), "got: {got}");
+    }
+
+    #[test]
+    fn figure_expanders_are_idempotent_on_non_figures() {
+        let src = "# Title\n\nParagraph with ![inline](x.png) image.\n";
+        assert_eq!(expand_figures_md(src), src);
+        assert_eq!(expand_figures_html(src), src);
     }
 }
