@@ -123,6 +123,29 @@
                         </Component>
                     </Directory>
 
+                    <!--
+                      The Start menu shortcut is what puts the app into Start > All apps,
+                      where it can be pinned and where people look for installed software.
+                      A Desktop shortcut and a PATH entry place nothing there.
+                      (Retrofitted from rust-skeleton; identity values cloned from this
+                      file's own DesktopShortcut, GUID minted fresh for this app.)
+                    -->
+                    <Component Id='StartMenuShortcut' Guid='261496B2-4195-4FD5-9A8A-FAB8B22F3076'>
+                        <Shortcut Id='StartMenuShortcut'
+                            Name='MD Reader'
+                            Description='Read-only markdown viewer'
+                            Directory='ProgramMenuFolder'
+                            Target='[Bin]mdreader.exe'
+                            WorkingDirectory='Bin'
+                            Icon='ProductICO' />
+                        <!-- ICE43: a non-advertised shortcut needs an HKCU keypath. -->
+                        <RegistryValue Root='HKCU'
+                            Key='Software\ophiocus\MDReader'
+                            Name='StartMenuShortcut'
+                            Type='integer'
+                            Value='1'
+                            KeyPath='yes' />
+                    </Component>
                     <Component Id='DesktopShortcut' Guid='A3E2B8F7-1D94-4C5E-B6A0-7F8E9D2C1A3B'>
                         <Shortcut Id='DesktopShortcut'
                             Name='MD Reader'
@@ -174,6 +197,7 @@
                     <Directory Id='ChromiumDir' Name='chromium' />
                 </Directory>
             </Directory>
+            <Directory Id='ProgramMenuFolder' Name='Programs' />
             <Directory Id='DesktopFolder' Name='Desktop' />
         </Directory>
 
@@ -194,6 +218,7 @@
 
             <ComponentRef Id='binary0'/>
 
+            <ComponentRef Id='StartMenuShortcut'/>
             <ComponentRef Id='DesktopShortcut'/>
             <ComponentRef Id='ContextMenuFolder'/>
             <ComponentRef Id='ContextMenuBackground'/>
